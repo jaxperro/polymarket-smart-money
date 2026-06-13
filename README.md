@@ -22,6 +22,7 @@ live), and backtest the strategy. Zero dependencies — Python 3 stdlib only
 | `lp_screener.py` | Rank reward-eligible markets by risk-adjusted LP yield (pool ÷ competition, penalized by volatility). |
 | `lp_paper.py` | Paper liquidity-provision loop — simulate quoting on the live book, track **net = rewards − adverse selection**. |
 | `xarb.py` | Cross-venue scanner — match the same event on Polymarket vs Kalshi and flag price gaps. |
+| `insider.py` | Insider/sharp detector — flag wallets winning *above their entry odds* (z-score / p-value), with timing, freshness, and sizing signals. |
 
 ## Run the dashboard
 
@@ -268,6 +269,46 @@ The large "edges" the scanner surfaces are artifacts: false matches (same event,
 different sub-question), illiquid wide-spread markets (exact-score, props), or
 stale snapshot timing. Matches the documented reality that real gaps last
 ~seconds and are taken by bots watching 10k+ markets.
+
+## Insider / sharp detection (`insider.py`) — the one real signal
+
+After the 2026 *60 Minutes* / WSJ coverage of Polymarket insider trading (a firm,
+Bubblemaps, found 9 anonymous wallets that won ~$2.4M at a 98% rate on Iran-war
+dates), `insider.py` replicates the *per-wallet* detection methodology on the
+public data API:
+
+- **Improbability (the core signal):** each bet entered at price `p` has an
+  odds-implied win prob `p`. Winning far more than `Σp` is a z-score and
+  one-sided p-value — the rigorous "luck can't explain this." This is the
+  *correct* version of the edge metric the whole project was chasing: beating
+  the market's own pricing, not raw win-rate (biased) or PnL (variance).
+- **Pre-resolution timing** — median hours before resolution they entered; share
+  of wins entered <24h out (advance-knowledge tell).
+- **Fresh wallet** (`/traded` count) and **sizing** — the insider fingerprint.
+- **Scoring is gated by improbability:** a wallet winning at/below its odds
+  scores 0 no matter how it's timed or sized (kills the sports-bettor confound,
+  where entering <24h before a game is normal, not suspicious).
+
+```bash
+python3 insider.py --scan 40                  # score top leaderboard wallets
+python3 insider.py --market <conditionId|slug># score everyone who traded a market (Bubblemaps approach)
+python3 insider.py --wallet 0xABC…            # deep-profile one wallet
+```
+
+**Findings:** the all-time leaderboard holds *no* extreme insiders (max z≈2.3) —
+those are high-volume sharps, not info-traders. Scanning a *market's* traders
+surfaces the real signal: e.g. `arimnestos` at **z=4.0, p≈3e-5** over 2,205 bets
+— a demonstrable edge. Distinguishing **sharp** (high z, normal timing) from
+**insider** (high z + late entry + fresh wallet) is the timing/freshness combo.
+The Bubblemaps **funding-cluster** step (linking an operator's wallets via
+who-funded-whom) needs a Polygonscan/Alchemy key — public RPC caps `getLogs` at
+10k blocks.
+
+**Why this matters:** the z-score over many bets is the first metric in this
+project that identifies a *real, hard-to-fake* edge. A high-z wallet has beaten
+the market's own prices repeatedly — a far better "who to study/follow" signal
+than the leaderboard. (Caveat: *trading* on material nonpublic info is illegal —
+detecting it is fine; blindly following a suspected insider is not a free pass.)
 
 ### The bottom line across the whole project
 
