@@ -1,9 +1,24 @@
 # Polymarket Smart Money
 
-Finds Polymarket wallets that **win more than 75% of their resolved bets** and
-**bet multiple times per week** — the "smart money" worth watching.
+Tools to find Polymarket wallets worth following, copy-trade them (paper or
+live), and backtest the strategy. Zero dependencies — Python 3 stdlib only
+(except live trading, which needs `py-clob-client`).
 
-Zero dependencies. One file, Python 3 stdlib only.
+> **Start here — read [What we learned](#what-we-learned-research-log).** The
+> project began as "find wallets winning >75% of their bets." That metric turned
+> out to be an artifact, and the research below changed what we actually measure.
+> Don't fund anything before reading it.
+
+## Tools
+
+| File | What it does |
+|------|--------------|
+| `smart_money.py` | Dashboard + scanner. Ranks leaderboard wallets by **true** win rate. |
+| `edge_research.py` | Scans up to ~2000 wallets for a reliable, copyable weekly edge (consistency metrics + copyability). |
+| `lookback.py` | Deep-dive a short list over a long window, split into halves for out-of-sample reads. |
+| `table_77.py` | Aggregate a filtered wallet set into one CSV (ROI, total staked, consistency). |
+| `copytrade.py` | Copy-trade engine — mirror a watchlist (paper by default, live gated). |
+| `backtest.py` | Replay a watchlist over a recent window and mark outcomes. |
 
 ## Run the dashboard
 
@@ -126,3 +141,62 @@ and runtime state never get committed.
 - Very high-volume / market-maker wallets (thousands of fills) can't be cleanly
   backtested via the public API — too many fills, no historical position
   snapshot.
+
+## What we learned (research log)
+
+The honest story of what the data showed, in order. Each finding killed an
+assumption the previous step relied on.
+
+**1. Win rate was an illusion (survivorship bias).**
+Polymarket only redeems *winning* shares; losing shares are worth $0 and sit
+unredeemed in `/positions` at `curPrice 0` forever, never entering
+`/closed-positions`. Measuring win rate over `/closed-positions` alone counts
+almost only winners. Examples: NiNo999 read 90.6%, true rate **48.3%**; Boggs
+read 73.4%, true **50.3%**. Fixed by unioning both endpoints over a window.
+**Takeaway: a high reported win rate is a red flag for a bias bug, not a sharp.**
+
+**2. With the honest metric, nobody wins 75%.**
+Across 25 top wallets, true win rates clustered at a **median 49%** (coin flip),
+max ~60%. Zero passed a 75% bar. Win rate is the wrong thing to rank on.
+
+**3. Win rate ≠ profit; raw PnL ≠ reliability.**
+`surfandturf` won 54.8% and made millions; `Latina` (leaderboard #1 all-time)
+won 43% and was **−$3.8M over 90 days**. And wallets with big total PnL often
+got there on one or two outlier weeks (38% green weeks) — a lottery, not an
+edge. The signal that finds reliable money is **weekly consistency**: % of weeks
+green, profit factor, weekly Sharpe — measured per week, with enough weeks.
+
+**4. Flat-size copy-trading is −EV.**
+A 7-day backtest of four "top" wallets returned **−48%**. At ~50% entry hit
+rates, mirroring entries at flat size just pays the spread on coin flips. A
+profitable wallet's edge lives in *sizing and entry prices*, which copying
+entries does not reproduce. (The backtest also exposed a missing per-position
+cap — proportional adds could balloon one market to the whole exposure limit.)
+
+**5. A reliable edge looks real but rare — and skews young.**
+Scanning 1,500 wallets over 120 days: 1,017 had history, 199 passed a
+consistency screen, **77 were copyable** (hold-to-resolution ≥70%). But ~7.5%
+of wallets passing by chance is exactly what randomness produces over 1,017
+coin-flippers — so some of the 77 are luck. Worse, a 240-day lookback showed
+the "best" wallets are **young accounts** (surfandturf's oldest bet: 72 days;
+joblessfinalboss: 79). New accounts that get hot rise to the leaderboard and
+pass the screen; the ones that flamed out are delisted. **The most impressive
+short-term performers are the least trustworthy.**
+
+**6. ROI and size are inversely related.**
+Among the 77 copyable wallets, the highest-ROI ones bet small (dnte: 57% ROI on
+$109K), while the biggest bettors scalp thin edges (elmcap2: $114M staked,
+**0.4%** ROI). `surfandturf` was the lone anomaly — big *and* high-ROI ($27.9M
+staked at 16%) — which makes it either the best find or the biggest variance
+story. At 72 days old, we can't yet tell.
+
+### Where this leaves the strategy
+
+- **Rank on risk-adjusted consistency** (% green weeks × profit factor ×
+  Sharpe), never win rate or raw PnL.
+- **Require account longevity** — distrust anything under ~4–6 months.
+- **Validate out-of-sample** (walk-forward: select on an early window, measure a
+  later one) before trusting any wallet list. This is the decisive open step.
+- **Copying entries ≠ copying edge.** A working strategy likely needs to model
+  sizing/pricing, or pivot to a consensus signal (bet where many vetted wallets
+  agree) rather than blind mirroring.

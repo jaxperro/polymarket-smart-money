@@ -7,3 +7,8 @@ config.json
 copytrade_state.json
 *.log
 *.tmp
+
+# generated research data (regenerable via edge_research.py / table_77.py)
+edge_metrics.jsonl
+edge_profitable.json
+copyable_77.csv
