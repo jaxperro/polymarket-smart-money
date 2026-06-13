@@ -20,6 +20,7 @@ live), and backtest the strategy. Zero dependencies — Python 3 stdlib only
 | `copytrade.py` | Copy-trade engine — mirror a watchlist (paper by default, live gated). |
 | `backtest.py` | Replay a watchlist over a recent window and mark outcomes. |
 | `lp_screener.py` | Rank reward-eligible markets by risk-adjusted LP yield (pool ÷ competition, penalized by volatility). |
+| `lp_paper.py` | Paper liquidity-provision loop — simulate quoting on the live book, track **net = rewards − adverse selection**. |
 
 ## Run the dashboard
 
@@ -233,5 +234,18 @@ correctly de-ranked: that's where you get picked off.
 **Caveats that still gate real money:** headline APRs are a *snapshot* — thin
 pools attract competitors and yield mean-reverts down; they're *gross*, ignoring
 inventory losses when you get filled; and we have not yet confirmed near-empty
-books actually pay the full pool. The paper LP loop (post near mid, requote on
-moves, track **net** = rewards − pick-off) is the next and decisive test.
+books actually pay the full pool.
+
+`lp_paper.py` is the decisive test — no money, no host, no key. It picks the
+screener's top low-vol markets, simulates two-sided quotes against the **live**
+order book, and tracks **net = rewards accrued − adverse-selection bleed**:
+
+```bash
+python3 lp_paper.py --capital 1000 --markets 6 --poll 20   # runs until stopped
+```
+
+Fills are modeled when the midpoint crosses a resting quote (deliberately a bit
+pessimistic on fill rate); rewards accrue by score-share of each pool. Net P&L,
+per-market breakdown, and Discord summaries let it run for days to see whether
+the edge survives mean-reversion. **Only if net stays clearly positive does a
+real, funded, hosted bot make sense.**
