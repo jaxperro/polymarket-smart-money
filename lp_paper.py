@@ -138,9 +138,9 @@ def net_pnl(s):
     return s["rewards"] + s["cash"] + s["inv"] * s["mid"]
 
 
-def summary(states, started, capital):
-    rew = sum(s["rewards"] for s in states)
-    trading = sum(s["cash"] + s["inv"] * s["mid"] for s in states)
+def summary(states, started, capital, retired):
+    rew = retired["rewards"] + sum(s["rewards"] for s in states)
+    trading = retired["trading"] + sum(s["cash"] + s["inv"] * s["mid"] for s in states)
     net = rew + trading
     hrs = (time.time() - started) / 3600 or 1e-9
     apr = net / capital / (hrs / 24) * 365 * 100 if capital else 0
@@ -175,16 +175,48 @@ def run(args):
                               f"${args.capital:,.0f} capital. Tracking net = rewards − bleed.")
 
     max_inv_shares = (per_market / 2) / 0.5 * args.max_inv   # rough share cap per market
+    # P&L from markets that have rotated out (resolved/expired) is banked here
+    # so cumulative net survives rotation.
+    retired = {"rewards": 0.0, "trading": 0.0}
+
+    def retire(s):
+        retired["rewards"] += s["rewards"]
+        retired["trading"] += s["cash"] + s["inv"] * s["mid"]
+
     last_report = started
     next_rescreen = started + args.refresh
     try:
         while True:
             for s in states:
                 poll_market(s, max_inv_shares)
-            save_state(states, started, args.capital)
             now = time.time()
+
+            # rotate: drop markets that fell out of the fresh screen (resolved /
+            # vol spiked / out-competed), bank their P&L, add fresh ones.
+            if now >= next_rescreen:
+                fresh = screen_targets(args.markets, args.min_rate, args.capital, args.max_vol)
+                fresh_toks = {t["token"] for t in fresh}
+                kept = []
+                for s in states:
+                    if s["token"] in fresh_toks:
+                        kept.append(s)
+                    else:
+                        retire(s)
+                states = kept
+                held = {s["token"] for s in states}
+                for t in fresh:
+                    if len(states) >= args.markets:
+                        break
+                    if t["token"] not in held:
+                        states.append(fresh_market_state(t, per_market))
+                next_rescreen = now + args.refresh
+                print(f"[{time.strftime('%H:%M:%S')}] re-screened · {len(states)} active "
+                      f"· banked net so far ${retired['rewards'] + retired['trading']:,.2f}",
+                      flush=True)
+
+            save_state(states, started, args.capital, retired)
             if now - last_report >= args.report:
-                net, txt = summary(states, started, args.capital)
+                net, txt = summary(states, started, args.capital, retired)
                 print(f"\n[{time.strftime('%H:%M:%S')}]\n{txt}", flush=True)
                 if webhook:
                     post_discord(webhook, "📊 **Paper LP update**\n" + txt)
@@ -194,7 +226,7 @@ def run(args):
             time.sleep(args.poll)
     except KeyboardInterrupt:
         pass
-    net, txt = summary(states, started, args.capital)
+    net, txt = summary(states, started, args.capital, retired)
     print(f"\n=== FINAL ===\n{txt}")
     print("\nPer-market:")
     for s in sorted(states, key=net_pnl, reverse=True):
@@ -202,15 +234,16 @@ def run(args):
               f"fills {s['fills']:3d} | inv {s['inv']:+8.1f} | {s['question']}")
 
 
-def save_state(states, started, capital):
+def save_state(states, started, capital, retired):
     slim = [{"question": s["question"], "pool": s["pool"],
              "rewards": round(s["rewards"], 2), "trading": round(s["cash"] + s["inv"] * s["mid"], 2),
              "inv": round(s["inv"], 1), "fills": s["fills"],
              "net": round(net_pnl(s), 2)} for s in states]
-    net, _ = summary(states, started, capital)
+    net, _ = summary(states, started, capital, retired)
     tmp = STATE_PATH + ".tmp"
     with open(tmp, "w") as f:
         json.dump({"started": started, "capital": capital, "net": round(net, 2),
+                   "retired": {k: round(v, 2) for k, v in retired.items()},
                    "markets": slim}, f, indent=2)
     os.replace(tmp, STATE_PATH)
 
