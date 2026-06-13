@@ -74,7 +74,8 @@ def post_discord(content):
     try:
         body = json.dumps({"content": content}).encode()
         req = urllib.request.Request(WEBHOOK, data=body, method="POST",
-                                     headers={"Content-Type": "application/json"})
+                                     headers={"Content-Type": "application/json",
+                                              "User-Agent": "Mozilla/5.0"})  # Discord 403s default UA
         urllib.request.urlopen(req, timeout=10, context=SSL_CTX).read()
     except (urllib.error.URLError, TimeoutError):
         log("⚠ Discord post failed")
