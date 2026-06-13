@@ -39,14 +39,20 @@ from copytrade import post_discord, load_json
 STATE_PATH = "lp_paper_state.json"
 
 
-def screen_targets(n, min_rate, capital, max_vol):
-    """Pick the top-N low-volatility reward markets to make on."""
+def screen_targets(n, min_rate, per_market, max_vol):
+    """Pick the top-N low-vol reward markets we can actually qualify in.
+
+    Filters out markets where our per-side size would fall below the market's
+    min_size (we'd earn nothing) and markets priced outside 0.10-0.90 (the
+    double-sided-only regime, easy to get adversely filled at the extremes).
+    """
     mkts = [m for m in reward_markets()
             if m.get("active") and not m.get("closed") and daily_rate(m) >= min_rate]
     scored = []
     def assess(m):
         r = m.get("rewards") or {}
         ms = r.get("max_spread", 0) / 100.0
+        min_size = r.get("min_size", 0)
         toks = m.get("tokens") or []
         if not toks or ms <= 0:
             return None
@@ -60,6 +66,10 @@ def screen_targets(n, min_rate, capital, max_vol):
         if not bids or not asks:
             return None
         mid = (max(p for p, _ in bids) + min(p for p, _ in asks)) / 2
+        if not (0.10 <= mid <= 0.90):            # extreme regime: skip
+            return None
+        if mid <= 0 or (per_market / 2) / mid < min_size:  # can't meet min_size
+            return None
         comp = min(sum(p * s for p, s in bids if p >= mid - ms),
                    sum((1 - p) * s for p, s in asks if p <= mid + ms))
         vol = realized_vol_cents(tok)
@@ -70,8 +80,7 @@ def screen_targets(n, min_rate, capital, max_vol):
             return None
         return {
             "token": tok, "question": m.get("question", "?")[:50],
-            "pool": daily_rate(m), "max_spread": ms,
-            "min_size": r.get("min_size", 0),
+            "pool": daily_rate(m), "max_spread": ms, "min_size": min_size,
             "tick": float(bk.get("tick_size", 0.01)),
             "comp": comp, "mid": mid, "vol": vol,
         }
@@ -93,7 +102,7 @@ def fresh_market_state(t, per_market):
             "last_t": time.time()}
 
 
-def poll_market(s, max_inv_shares):
+def poll_market(s, max_inv_mult, max_dt):
     """One observe-fill-accrue-requote step against the live book."""
     try:
         bk = get(f"{CLOB}/book?token_id={s['token']}")
@@ -104,31 +113,42 @@ def poll_market(s, max_inv_shares):
     if not bids or not asks:
         return
     mid = (max(p for p, _ in bids) + min(p for p, _ in asks)) / 2
+    if mid <= 0:
+        return
     now = time.time()
-    dt = now - s["last_t"]
+    dt = min(now - s["last_t"], max_dt)   # cap dt so a stall/sleep can't over-credit
     s["last_t"] = now
-    size = s["notional"] / mid if mid > 0 else 0
+    size = s["notional"] / mid            # intended per-side size (shares)
+    cap = max_inv_mult * size             # price-aware inventory cap
 
-    # 1) fills: did the mid cross our resting quotes since last poll?
-    #    cash + mark-to-market captures the adverse-selection loss directly.
+    # 1) fills: did the mid cross our resting quotes? cap the fill to remaining
+    #    inventory room so one fill can't overshoot the intended position.
     if s["bid"] is not None and mid <= s["bid"]:           # bought at our bid
-        s["inv"] += size
-        s["cash"] -= size * s["bid"]
-        s["fills"] += 1
+        f = min(size, max(0.0, cap - s["inv"]))
+        if f > 0:
+            s["inv"] += f
+            s["cash"] -= f * s["bid"]
+            s["fills"] += 1
     if s["ask"] is not None and mid >= s["ask"]:           # sold at our ask
-        s["inv"] -= size
-        s["cash"] += size * s["ask"]
-        s["fills"] += 1
+        f = min(size, max(0.0, cap + s["inv"]))
+        if f > 0:
+            s["inv"] -= f
+            s["cash"] += f * s["ask"]
+            s["fills"] += 1
 
-    # 2) accrue rewards for the elapsed time
+    # 2) accrue rewards — only if we'd actually qualify (min_size, price regime),
+    #    and at 1/3 share when only one side is live (Polymarket's Q_min penalty).
     comp = s["comp"]
-    share = s["notional"] / (s["notional"] + comp) if (s["notional"] + comp) > 0 else 0
-    s["rewards"] += s["pool"] * share * (dt / 86400.0)
+    base = s["notional"] / (s["notional"] + comp) if (s["notional"] + comp) > 0 else 0
+    both_live = (s["inv"] < cap) and (s["inv"] > -cap)
+    qualifies = size >= s["min_size"] and 0.10 <= mid <= 0.90
+    eff = 0.0 if not qualifies else (base if both_live else base / 3.0)
+    s["rewards"] += s["pool"] * eff * (dt / 86400.0)
 
     # 3) re-quote around the new mid (within max_spread), respecting inventory cap
     s["mid"] = mid
-    s["bid"] = mid - s["tick"] if s["inv"] < max_inv_shares else None   # stop adding if long
-    s["ask"] = mid + s["tick"] if s["inv"] > -max_inv_shares else None
+    s["bid"] = mid - s["tick"] if s["inv"] < cap else None
+    s["ask"] = mid + s["tick"] if s["inv"] > -cap else None
     ms = s["max_spread"]
     s["comp"] = min(sum(p * sz for p, sz in bids if p >= mid - ms),
                     sum((1 - p) * sz for p, sz in asks if p <= mid + ms))
@@ -159,9 +179,9 @@ def run(args):
     per_market = args.capital / args.markets
     print(f"[{time.strftime('%H:%M:%S')}] screening for {args.markets} low-vol markets...",
           flush=True)
-    targets = screen_targets(args.markets, args.min_rate, args.capital, args.max_vol)
+    targets = screen_targets(args.markets, args.min_rate, per_market, args.max_vol)
     if not targets:
-        print("No suitable low-vol markets found right now.")
+        print("No suitable markets we can qualify in at this capital/market split.")
         return
     states = [fresh_market_state(t, per_market) for t in targets]
     started = time.time()
@@ -174,7 +194,7 @@ def run(args):
         post_discord(webhook, f"📊 **Paper LP started** · {len(states)} markets · "
                               f"${args.capital:,.0f} capital. Tracking net = rewards − bleed.")
 
-    max_inv_shares = (per_market / 2) / 0.5 * args.max_inv   # rough share cap per market
+    max_dt = max(120, args.poll * 5)   # cap reward accrual gap (sleep/stall guard)
     # P&L from markets that have rotated out (resolved/expired) is banked here
     # so cumulative net survives rotation.
     retired = {"rewards": 0.0, "trading": 0.0}
@@ -188,31 +208,37 @@ def run(args):
     try:
         while True:
             for s in states:
-                poll_market(s, max_inv_shares)
+                poll_market(s, args.max_inv, max_dt)
             now = time.time()
 
             # rotate: drop markets that fell out of the fresh screen (resolved /
             # vol spiked / out-competed), bank their P&L, add fresh ones.
             if now >= next_rescreen:
-                fresh = screen_targets(args.markets, args.min_rate, args.capital, args.max_vol)
-                fresh_toks = {t["token"] for t in fresh}
-                kept = []
-                for s in states:
-                    if s["token"] in fresh_toks:
-                        kept.append(s)
-                    else:
-                        retire(s)
-                states = kept
-                held = {s["token"] for s in states}
-                for t in fresh:
-                    if len(states) >= args.markets:
-                        break
-                    if t["token"] not in held:
-                        states.append(fresh_market_state(t, per_market))
                 next_rescreen = now + args.refresh
-                print(f"[{time.strftime('%H:%M:%S')}] re-screened · {len(states)} active "
-                      f"· banked net so far ${retired['rewards'] + retired['trading']:,.2f}",
-                      flush=True)
+                try:
+                    fresh = screen_targets(args.markets, args.min_rate, per_market, args.max_vol)
+                except Exception as e:
+                    fresh = None
+                    print(f"[{time.strftime('%H:%M:%S')}] re-screen failed ({e}); "
+                          f"keeping current markets", flush=True)
+                if fresh:
+                    fresh_toks = {t["token"] for t in fresh}
+                    kept = []
+                    for s in states:
+                        if s["token"] in fresh_toks:
+                            kept.append(s)
+                        else:
+                            retire(s)
+                    states = kept
+                    held = {s["token"] for s in states}
+                    for t in fresh:
+                        if len(states) >= args.markets:
+                            break
+                        if t["token"] not in held:
+                            states.append(fresh_market_state(t, per_market))
+                    print(f"[{time.strftime('%H:%M:%S')}] re-screened · {len(states)} active "
+                          f"· banked net so far ${retired['rewards'] + retired['trading']:,.2f}",
+                          flush=True)
 
             save_state(states, started, args.capital, retired)
             if now - last_report >= args.report:
