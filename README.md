@@ -21,6 +21,7 @@ live), and backtest the strategy. Zero dependencies — Python 3 stdlib only
 | `backtest.py` | Replay a watchlist over a recent window and mark outcomes. |
 | `lp_screener.py` | Rank reward-eligible markets by risk-adjusted LP yield (pool ÷ competition, penalized by volatility). |
 | `lp_paper.py` | Paper liquidity-provision loop — simulate quoting on the live book, track **net = rewards − adverse selection**. |
+| `xarb.py` | Cross-venue scanner — match the same event on Polymarket vs Kalshi and flag price gaps. |
 
 ## Run the dashboard
 
@@ -249,3 +250,32 @@ pessimistic on fill rate); rewards accrue by score-share of each pool. Net P&L,
 per-market breakdown, and Discord summaries let it run for days to see whether
 the edge survives mean-reversion. **Only if net stays clearly positive does a
 real, funded, hosted bot make sense.**
+
+## Cross-venue arbitrage: Polymarket ↔ Kalshi (`xarb.py`)
+
+The last relative-value lane: buy YES on one venue + NO on the other for < $1
+(net of fees) = locked profit. Kalshi's public API (`api.elections.kalshi.com`)
+exposes ~65k markets; `xarb.py` pulls both venues, matches the same event
+(token overlap + same resolution month + **exact numeric match** on
+thresholds/scores/dates so we compare the same *contract*, not just the same
+event), and computes both arb directions with Kalshi's `0.07·P·(1−P)` taker fee.
+
+**Verdict: efficient — no retail arb.** On liquid, cleanly-matched, identical
+contracts the two venues agree to **~1¢**, and locking both sides costs **>$1
+after fees.** Worked example (live): *Brazil vs Morocco — Both Teams To Score*
+priced PM 0.46/0.47 vs Kalshi 0.47/0.48; every arb direction nets **negative**.
+The large "edges" the scanner surfaces are artifacts: false matches (same event,
+different sub-question), illiquid wide-spread markets (exact-score, props), or
+stale snapshot timing. Matches the documented reality that real gaps last
+~seconds and are taken by bots watching 10k+ markets.
+
+### The bottom line across the whole project
+
+Six systematic, public-data edges tested — copy-trading, win-rate ranking, LP
+reward farming, binary arb, multi-outcome logical arb, and cross-venue arb —
+**all efficient or illusory.** Polymarket in 2026 does not hand a retail bot a
+turnkey edge. Durable edge requires *speed/infra* (competing with pro arb bots),
+*genuine private information* (a niche you know better than the market), or
+*getting paid to provide a service* (liquidity, at modest adverse-selection-
+dominated yields). The most valuable output here is knowing that before funding
+any of it.
