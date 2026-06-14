@@ -1,8 +1,8 @@
 # 🏆 Winning Wallet Finder
 
 Find Polymarket wallets with a **real, statistically-verifiable edge**, test
-whether copying them actually makes money, and **get pinged the moment they
-trade**.
+whether copying them actually makes money, **get pinged the moment they trade**,
+and watch a **live $1,000 paper portfolio** follow them in real time.
 
 This started as "copy the smart money." Along the way we tested — and ruled out
 — six systematic public-data strategies, and found that the *only* signal that
@@ -49,12 +49,12 @@ Two refinements separate signal from noise:
 ## How the pieces fit
 
 ```
- data layer            detection              hunting                 validation            live
- ──────────            ─────────              ───────                 ──────────            ────
- smart_money.py  ──▶   insider.py     ──▶     hunt.py / huntwide.py ─▶ copyback.py / oos.py  webhook_receiver.py
- (Polymarket API,      (z-score, timing,      (sweep markets,         (does copying them    (Alchemy webhook →
-  true win rate)        freshness, funding     surface edge wallets)   actually pay? in- &    Discord ping on
-                        clustering)                                    out-of-sample)         every trade)
+ data layer        detection           hunting              validation          live system
+ ──────────        ─────────           ───────              ──────────          ───────────
+ smart_money.py ─▶ insider.py     ──▶  hunt.py / huntwide ▶ copyback / oos.py ▶ webhook_receiver.py ─▶ Discord ping
+ (Polymarket API,  (z-score, timing,   (sweep markets,      (does copying them   (Alchemy webhook)
+  true win rate)    freshness, funding  surface edge         actually pay? in- &  trading/ (paper) ────▶ live $1k
+                    clustering)         wallets)             out-of-sample)       jaxperro.com/trading   portfolio
 ```
 
 | File | Role |
@@ -66,6 +66,8 @@ Two refinements separate signal from noise:
 | `copyback.py` | Backtest: copy edge wallets' entries from a date, weighted, compounding. |
 | `oos.py` | **Out-of-sample test** — select wallets on pre-period data, copy forward. The honesty gate. |
 | `webhook_receiver.py` | Push-based live watcher: Alchemy on-chain webhook → enrich → Discord. |
+| `watch.json` | The tracked wallet set + edge weights (shared by the watcher and the tracker). |
+| paper tracker | Client-side `$1,000` running portfolio → [jaxperro.com/trading](https://jaxperro.com/trading) (page lives in the personal site repo). |
 | `archive/` | The six strategies that didn't work, kept for reference ([details](archive/README.md)). |
 
 ---
@@ -114,21 +116,46 @@ python3 smart_money.py                 # dashboard at http://localhost:8899
 
 ---
 
-## Live watcher — get pinged on every trade
+## The live system
 
-Push-based (no polling). The instant a tracked wallet's proxy transacts on
-Polygon (~2–5s), Alchemy POSTs `webhook_receiver.py`, which enriches the trade
-via the data-API and pings Discord: `🟢 Famecesgoal BUY Yes @ 0.34 ($120) — <market>`.
+Two always-on pieces, both running on near-zero infrastructure cost. The wallets
+they track live in `watch.json` (currently the **4 sharpest, followable**
+wallets — high z, not bots, not in-game — re-weighted by z).
+
+### 1. Discord watcher — pinged on every trade (`webhook_receiver.py`)
+
+Push-based, no polling. The instant a tracked wallet's proxy transacts on
+Polygon (~2–5s), Alchemy POSTs the receiver, which enriches the trade via the
+data-API and pings Discord: `🟢 Famecesgoal BUY Yes @ 0.34 ($120) — <market>`.
+It's a tiny stdlib HTTP server that idles at ~zero CPU between trades.
 
 1. **Discord webhook** → set `DISCORD_WEBHOOK` env (or `config.json`).
 2. **Deploy** the receiver to an always-on host (Railway / Fly / a $5 VPS — *not*
-   Render free, it sleeps). `Procfile` included; binds to `$PORT`.
+   Render free, it sleeps). `Procfile`, `requirements.txt`, `nixpacks.toml`
+   included; binds to `$PORT`, exposes `/alchemy` (POST) and `/health` (GET).
 3. **Alchemy** → create an *Address Activity* webhook (Polygon mainnet), add the
-   `watch.json` addresses, point it at `https://your-host/alchemy`, and set the
-   signing key as `ALCHEMY_SIGNING_KEY`.
+   `watch.json` addresses, point it at `https://your-host/alchemy`, set the
+   signing key as `ALCHEMY_SIGNING_KEY` (turns on HMAC verification).
 
 Keep the two wallet lists in sync: Alchemy's address list (what *triggers*) and
 `watch.json` (what *names* the alert).
+
+### 2. Live paper portfolio — `trading/` → [jaxperro.com/trading](https://jaxperro.com/trading)
+
+A **$1,000 paper account that behaves like real money**: it replays every
+watched-wallet trade since inception, **enters when they enter** (if there's
+cash), holds each bet **to resolution**, then settles (win → payout, loss → $0)
+and frees the cash. Shows **Liquid** (cash), **Invested** (open bets marked to
+market), **Realized** (settled P&L), a **Current Bets** table with per-bet entry
+/ mark / P&L / *settle date*, and — crucially — **Missed P&L**: the profit left
+on the table from trades skipped because the bankroll was fully deployed (the
+real cost of a small account). It runs **100% client-side** off Polymarket's
+public API (CORS-open) — zero backend, zero added cost.
+
+> **What the tracker taught us:** $1,000 across many hyperactive wallets gets
+> fully deployed almost instantly — you can follow only a few percent of their
+> trades. Concentrating on a handful of high-conviction wallets with bigger
+> stakes is the only way a small bankroll meaningfully mirrors them.
 
 ---
 
