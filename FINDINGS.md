@@ -142,6 +142,29 @@ misleading signal on the platform; favorite-riders are uncopyable.* The
 underdog/`value` archetype (beats longshot prices) is the only one left worth
 testing.
 
+## Train/test wallet selection, and the capital wall (June 2026)
+
+Built `live/strategy.py` (train on bets resolved before May 30, validate June 1+)
+and `live/followability.py` (entry-time + lead-time + cadence filter). Selecting
+on **copy-ROI + z + monthly consistency + diversification** (not win rate) gave
+150 wallets; **59/100 stayed profitable forward** (p=0.044), and filtering to
+*followable* markets lifted it to **49/77 (p=0.011), +23.4% pooled** out-of-
+sample. So a real, persistent, copyable edge **does** exist — unlike favorites.
+
+Then the reality check (`live/pnl_basket.py`, `live/pnl_focused.py`): a $1,000
+copier with **missed-trade accounting** (capital tied in open positions).
+- **Broad 10-wallet basket:** the wallets fire **1,210 markets** in June; $1,000
+  can follow only ~2–13% of them. At realistic stakes it **loses** (−$384 to
+  −$800); the gains sit in the trades you couldn't afford ($14k–$153k "missed").
+  **Capital, not edge, is the binding constraint.**
+- **Focused + conviction:** copy only 1–2 top wallets and only their larger-stake
+  (≥$200) bets → trade count drops to ~30–40, $1,000 affords them all, and it
+  **clears: +91% to +247% across stakes, stable, no blowup.**
+
+*Lesson: a small-bankroll copier cannot follow a skilled wallet's whole feed —
+the edge is only capturable by concentrating on few wallets' high-conviction
+bets. The live tracker (jaxperro.com/trading) now runs exactly that config.*
+
 ## Repo layout
 
 - `insider.py` — the detector: z-score/p-value, timing/freshness/sizing signals,

@@ -33,6 +33,31 @@ _con.execute("""CREATE TABLE IF NOT EXISTS bets(
     wallet TEXT, cond TEXT, won BOOLEAN, p DOUBLE, res_t BIGINT, size DOUBLE)""")
 _con.execute("CREATE INDEX IF NOT EXISTS bets_w ON bets(wallet)")
 _con.execute("CREATE TABLE IF NOT EXISTS pulled(wallet TEXT PRIMARY KEY, pulled_at BIGINT)")
+_con.execute("CREATE TABLE IF NOT EXISTS entries(wallet TEXT, cond TEXT, first_buy BIGINT)")
+_con.execute("CREATE INDEX IF NOT EXISTS entries_w ON entries(wallet)")
+_con.execute("CREATE TABLE IF NOT EXISTS pulled_entries(wallet TEXT PRIMARY KEY, pulled_at BIGINT)")
+
+
+def get_entries(wallet):
+    """{conditionId: earliest BUY timestamp} for a wallet — cached. Lets us
+    compute entry->resolution lead time and trade cadence (followability)."""
+    now = time.time()
+    with _lock:
+        r = _con.execute("SELECT pulled_at FROM pulled_entries WHERE wallet=?", [wallet]).fetchone()
+        if r and now - r[0] < MAX_AGE_DAYS * 86400:
+            rows = _con.execute("SELECT cond,first_buy FROM entries WHERE wallet=?", [wallet]).fetchall()
+            return {c: t for c, t in rows}
+    try:
+        first_buy, _ = insider.entry_times(wallet)
+    except Exception:
+        first_buy = {}
+    with _lock:
+        _con.execute("DELETE FROM entries WHERE wallet=?", [wallet])
+        if first_buy:
+            _con.executemany("INSERT INTO entries(wallet,cond,first_buy) VALUES (?,?,?)",
+                             [(wallet, c, t) for c, t in first_buy.items()])
+        _con.execute("INSERT OR REPLACE INTO pulled_entries VALUES (?,?)", [wallet, int(now)])
+    return first_buy
 
 
 def get_bets(wallet):

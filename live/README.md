@@ -62,6 +62,18 @@ turn into losers out-of-sample. **Don't copy favorite-riders.** The `value`
 archetype (beats underdog prices) is where real alpha may live — test it with
 `backtest_june.py value`.
 
+## Strategy backtests
+
+- `strategy.py` — train (pre-May-30) / test (June1+) wallet selection on copy-ROI
+  + z + monthly consistency + diversification. → `selection.json`.
+- `followability.py` — pull entry timestamps (cached), drop wallets whose edge is
+  in un-followable fast/live markets, re-rank on followable forward bets. →
+  `watch_final.json` (the execution-realistic list).
+- `pnl_basket.py` / `pnl_focused.py` — $1,000 capital-constrained copy sims with
+  **missed-trade accounting**. Key result: the broad basket loses on $1k (can't
+  follow 1,200 trades), but **1–2 wallets + a conviction (bet-size) filter clears**
+  out-of-sample. See `../FINDINGS.md`.
+
 ## Daily (`daily.sh`)
 
 1. discover (enumerate last 14d) → 2. freshen cache (force-refresh watchlist +
