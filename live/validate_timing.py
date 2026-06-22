@@ -17,9 +17,52 @@ import statistics as st
 from concurrent.futures import ThreadPoolExecutor
 
 import cache
+import smart_money as sm
 
 HERE = os.path.dirname(__file__)
 COPYABLE_MED_LEAD = 24.0     # median lead (h) on winning conviction bets to count as copyable
+
+
+def _bet_pnl(b):
+    """Resolved (outcome) P&L of one bet: a $size stake bought at avg price p pays
+    size/p if it resolved a win, else $0 — so P&L = size·(1−p)/p if won else −size.
+    The cache's `won` already unions redeemed + resolved-unredeemed, so this is
+    survivorship-correct."""
+    p = max(0.001, min(0.999, b["p"] or 0))
+    return b["size"] * ((1 - p) / p if b["won"] else -1)
+
+
+def display_stats(w):
+    """Everything the dashboard's sharp table renders, precomputed so the page makes
+    ZERO per-wallet data-api calls (it just reads the feed). Computed from the cache
+    (every resolved bet over the 180d window, survivorship-correct):
+
+      conv win%/record/P&L : over ALL of the wallet's conviction bets (top-20% stake)
+      realized P&L         : over the most recent 500 resolved bets (any size)
+      name / last-bet      : one /activity pull (record `name`; latest BUY >= trade p80)
+    """
+    bets = [b for b in cache.get_bets(w) if (b["size"] or 0) > 0]
+    thr = cache.conv_cutoff(b["size"] for b in bets)
+    conv = [b for b in bets if b["size"] >= thr]                      # ALL conviction bets
+    won = sum(1 for b in conv if b["won"])
+    recent = sorted(bets, key=lambda b: b["res_t"] or 0, reverse=True)[:500]   # last 500 resolved
+    out = {
+        "conv_win": round(100 * won / len(conv), 1) if conv else None,
+        "conv_won": won, "conv_lost": len(conv) - won,
+        "conv_pnl": round(sum(_bet_pnl(b) for b in conv)),
+        "realized_pnl": round(sum(_bet_pnl(b) for b in recent)),
+        "name": None, "last_trade": 0, "last_conv_bet": 0,
+    }
+    a = sm.get_json("/activity", {"user": w, "type": "TRADE", "limit": 300}) or []
+    if a:
+        out["last_trade"] = a[0].get("timestamp", 0)
+        out["name"] = next((t.get("name") for t in a if t.get("name")), None)
+        tthr = cache.conv_cutoff(t.get("usdcSize", 0) for t in a if t.get("side") == "BUY")
+        for t in a:
+            if t.get("side") == "BUY" and (t.get("usdcSize", 0) or 0) >= tthr:
+                out["last_conv_bet"] = t.get("timestamp", 0)
+                break
+    return out
 
 
 def lead_profile(w):
@@ -51,6 +94,14 @@ def main():
             c["timing"] = p["verdict"]
             if p["verdict"] == "sharp":
                 sharps.append(c)
+    # enrich the sharps with the exact stats the dashboard renders, so it reads them
+    # straight from the feed (1 request) instead of 3 data-api calls per wallet.
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for c, ds in zip(sharps, ex.map(lambda c: display_stats(c["wallet"]), sharps)):
+            c.update(ds)
+            if ds.get("name"):
+                c["name"] = ds["name"]          # real Polymarket username (else keep prefix)
+
     sharps.sort(key=lambda c: (c["fwd_conv_roi"] is not None, c.get("fwd_conv_roi") or -9,
                                c["train_conv_roi"]), reverse=True)
 
