@@ -36,6 +36,7 @@ echo "[daily] $(date '+%F %T') 5/6 dashboard"
 python3 dashboard.py
 mkdir -p history && cp watch_skilled.json "history/watch_$(date '+%Y%m%d').json" 2>/dev/null
 echo "[daily] $(date '+%F %T') 6/6 publish (commit + push refreshed outputs)"
+PUBLISH="no changes"
 git add watch_skilled.json watch_sharps.json conviction_wallets.json 2>/dev/null
 if git diff --cached --quiet 2>/dev/null; then
     echo "[daily] no output changes to publish"
@@ -44,9 +45,33 @@ elif git commit -q -m "live: daily refresh — skilled + sharp wallets [skip ci]
     # auto-push permanently; abort a conflicting rebase and retry next run.
     git pull --rebase -q origin main 2>/dev/null || git rebase --abort 2>/dev/null || true
     if git push -q origin main; then
-        echo "[daily] pushed refreshed sharp list"
+        echo "[daily] pushed refreshed sharp list"; PUBLISH="pushed"
     else
-        echo "[daily] push failed — committed locally, will retry next run"
+        echo "[daily] push failed — committed locally, will retry next run"; PUBLISH="push failed (committed locally)"
     fi
 fi
 echo "[daily] $(date '+%F %T') done -> watch_sharps.json + dashboard.html"
+
+# ping Discord (webhook kept in gitignored ../config.json -> daily_webhook)
+PUBLISH="$PUBLISH" python3 - <<'PY'
+import json, os, ssl, time, urllib.request
+try:                                   # cwd is live/ (daily.sh cd's there); config is repo-root
+    hook = json.load(open("../config.json")).get("daily_webhook")
+except Exception:
+    hook = None
+if hook:
+    try:
+        n = len(json.load(open("watch_sharps.json")))
+    except Exception:
+        n = "?"
+    msg = (f"✅ Sharp pipeline finished {time.strftime('%Y-%m-%d %H:%M')} — "
+           f"{n} copyable sharps · feed {os.environ.get('PUBLISH','?')}")
+    data = json.dumps({"content": msg}).encode()
+    req = urllib.request.Request(hook, data=data,
+        headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"})  # Discord 403s w/o UA
+    try:
+        urllib.request.urlopen(req, timeout=15, context=ssl._create_unverified_context())
+        print("[daily] discord pinged")
+    except Exception as e:
+        print("[daily] discord ping failed:", e)
+PY
