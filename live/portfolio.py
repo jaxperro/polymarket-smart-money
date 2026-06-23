@@ -165,6 +165,12 @@ def main():
         # hypothetical P&L had we been able to afford it (held to resolution)
         m["pnl"] = STAKE * ((1.0 / m["p"]) - 1) if m["won"] else -STAKE
     wins = sum(1 for r in resolved if r.get("won"))
+    # per-wallet conviction threshold (cache p80) so the dashboard can filter LIVE open
+    # positions the same way; 1e12 = "no sized bets" (nothing qualifies)
+    conv_thr = {}
+    for w in WALLETS:
+        t = cache.conv_cutoff(b["size"] for b in cache.get_bets(w["wallet"]) if (b["size"] or 0) > 0)
+        conv_thr[w["wallet"]] = round(t) if t != float("inf") else 1e12
     equity = cash + invested
     out = {
         "started": START, "updated": now,
@@ -175,7 +181,8 @@ def main():
         "resolved_count": len(resolved), "wins": wins, "losses": len(resolved) - wins,
         "open_count": len(current), "missed_count": len(missed),
         "wallets": [{"name": v["name"], "wallet": v["wallet"], "bets": v["bets"],
-                     "invested": round(v["invested"], 2), "realized": round(v["realized"], 2)}
+                     "invested": round(v["invested"], 2), "realized": round(v["realized"], 2),
+                     "conv_thr": conv_thr.get(v["wallet"], 1e12)}
                     for v in perW.values()],
         "current": [{"title": c.get("title", ""), "name": c["name"], "outcome": c.get("outcome", ""),
                      "stake": STAKE, "val": round(c["val"], 2), "pnl": round(c["pnl"], 2),
