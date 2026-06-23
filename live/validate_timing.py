@@ -110,6 +110,13 @@ def main():
             if ds.get("name"):
                 c["name"] = ds["name"]          # real Polymarket username (else keep prefix)
 
+    # drop wallets that haven't traded in 30 days — the feed should only list
+    # currently-active sharps (last_trade comes from display_stats' /activity pull)
+    cut30 = time.time() - 30 * 86400
+    before = len(sharps)
+    sharps = [c for c in sharps if (c.get("last_trade") or 0) >= cut30]
+    print(f"active filter: dropped {before - len(sharps)} sharp(s) inactive >30d -> {len(sharps)} active")
+
     sharps.sort(key=lambda c: (c["fwd_conv_roi"] is not None, c.get("fwd_conv_roi") or -9,
                                c["train_conv_roi"]), reverse=True)
 
