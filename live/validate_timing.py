@@ -51,6 +51,7 @@ def display_stats(w):
         "conv_won": won, "conv_lost": len(conv) - won,
         "conv_pnl": round(sum(_bet_pnl(b) for b in conv)),
         "realized_pnl": round(sum(_bet_pnl(b) for b in recent)),
+        "avg_bet": round(sum(b["size"] for b in conv) / len(conv)) if conv else 0,  # avg conviction stake
         "name": None, "last_trade": 0, "last_conv_bet": 0,
     }
     a = sm.get_json("/activity", {"user": w, "type": "TRADE", "limit": 300}) or []
