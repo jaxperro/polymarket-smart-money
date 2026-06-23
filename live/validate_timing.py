@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Last-minute-vs-sharp check on the standout conviction wallets.
+"""Select the COPYABLE conviction wallets — by what a copier actually earns.
 
-This is a COPYABILITY heuristic, not proof of inside information: a near-100%
-win rate is only useful to us if we can actually mirror it. The tell is entry->
-resolution lead time on their WINNING conviction bets:
-  * mostly < 1h before resolution  -> last-minute, you can't follow it in time
-  * hours-to-days of lead          -> a sharp you could actually mirror
-A short lead can mean a genuine insider OR just someone who trades fast-resolving
-markets (live sports, hourly) well — we can't tell which, and for copy purposes
-it doesn't matter: either way the window is too tight to mirror.
+The earlier version gated on entry->resolution lead time (a proxy for "can we
+mirror it"). That was too blunt: it kept scalpers whose position win% looks great
+but lose when copied, and dropped fast-resolving holders that are perfect for a
+small fast-recycling bankroll. The fix: run a full flat-$50 copy replay on every
+conviction wallet and SELECT on copyability directly —
+  * copy_pnl > 0                 — copying them actually makes money, AND
+  * held_pnl > 0 over >= MIN_HELD — their hold-to-resolution edge is real (the
+                                    latency-robust leg), not just scalp-sell timing
+  * active in 30d, median lead >= MIN_LEAD_H (light guard vs true sub-hour snipers)
+This keeps Kruto (sells often but profitably) and surfaces copy-positive holders
+the lead gate used to discard; it drops scalper-traps like a wallet that's only
+positive via sells while its held bets lose.
 """
 
 import json
@@ -86,9 +90,19 @@ def display_stats(w):
         "conv30_pnl": round(sum(_bet_pnl(b) for b in conv30)),
         "realized_pnl": round(sum(_bet_pnl(b) for b in recent)),
         "avg_bet": round(sum(b["size"] for b in conv) / len(conv)) if conv else 0,
-        "copy_pnl": 0, "name": None, "last_trade": 0, "last_conv_bet": 0,
+        "copy_pnl": 0, "held_pnl": 0, "held_won": 0, "held_lost": 0, "sold": 0,
+        "name": None, "last_trade": 0, "last_conv_bet": 0,
     }
-    # ---- activity: name, last-bet, and the flat-$50 copy replay (copy P&L) ----
+    # ---- resolution map from a FRESH positions pull (curPrice extreme = resolved);
+    #      cheap, so the copy replay can run on every conviction wallet. clob fills gaps.
+    resmap = {}
+    for p in (sm.get_json("/closed-positions", {"user": w, "limit": 500,
+                          "sortBy": "TIMESTAMP", "sortDirection": "DESC"}) or []) + \
+             (sm.get_json("/positions", {"user": w, "limit": 500, "sizeThreshold": 0}) or []):
+        cp = p.get("curPrice", 0) or 0
+        if (cp <= 0.001 or cp >= 0.999) and p.get("asset") and p["asset"] not in resmap:
+            resmap[p["asset"]] = 1 if cp >= 0.5 else 0
+    # ---- activity: name, last-bet, and the flat-$50 copy replay ----
     a = []
     for off in range(0, 4000, 500):
         pg = sm.get_json("/activity", {"user": w, "type": "TRADE", "limit": 500, "offset": off}) or []
@@ -108,9 +122,13 @@ def display_stats(w):
             if t.get("side") == "BUY" and mkt.get(t.get("conditionId"), 0) >= cthr:
                 out["last_conv_bet"] = t.get("timestamp", 0)
                 break
-        # replay a flat-$50 copy of their conviction markets since Jun 1
+        # replay a flat-$50 copy of their conviction markets since Jun 1. Split P&L into
+        # the SOLD (scalp) leg and the HELD-to-resolution leg — the held leg is the
+        # latency-robust edge; a wallet whose copy P&L is positive only via scalp sells
+        # (held leg negative) isn't a reliable copy target.
         ev = sorted([t for t in a if t.get("timestamp", 0) >= JUN1], key=lambda t: t.get("timestamp", 0))
-        openp, entered, copy = {}, set(), 0.0
+        openp, entered, scalp, held = {}, set(), 0.0, 0.0
+        hw = hl = sold = 0
         for t in ev:
             c, pr, asset = t.get("conditionId"), t.get("price", 0) or 0, t.get("asset")
             if not c or pr <= 0:
@@ -119,14 +137,18 @@ def display_stats(w):
                 if mkt.get(c, 0) < cthr or c in entered or c in openp:
                     continue
                 entered.add(c); openp[c] = {"sh": STAKE / pr, "a": asset}
-            elif c in openp:                                    # mirror their exit
-                copy += openp[c]["sh"] * pr - STAKE; del openp[c]
-        for c, p in openp.items():                              # settle held bets at AUTHORITATIVE resolution
-            wv = _clob_winner(c, p["a"])
+            elif c in openp:                                    # mirror their exit (scalp)
+                scalp += openp[c]["sh"] * pr - STAKE; sold += 1; del openp[c]
+        for c, p in openp.items():                              # settle held bets at resolution
+            wv = resmap.get(p["a"])
+            if wv is None:
+                wv = _clob_winner(c, p["a"])                    # clob fallback for out-of-pull markets
             if wv is None:
                 continue                                        # not resolved yet -> exclude
-            copy += (p["sh"] if wv else 0) - STAKE
-        out["copy_pnl"] = round(copy)
+            held += (p["sh"] if wv else 0) - STAKE
+            hw += wv; hl += 1 - wv
+        out.update(copy_pnl=round(scalp + held), held_pnl=round(held),
+                   held_won=hw, held_lost=hl, sold=sold)
     return out
 
 
@@ -146,53 +168,53 @@ def lead_profile(w):
     return dict(n=len(leads), med=med, u6=u6, verdict=verdict)
 
 
+MIN_HELD = 8          # need this many resolved held conviction bets to trust the held edge
+MIN_HELD_WR = 0.55    # held bets must WIN a clear majority — excludes longshot-variance
+                      # players (+EV but ~34% win) that don't fit the high-win-rate thesis
+MIN_LEAD_H = 1.0      # light sniper guard: drop wallets whose median winning lead < 1h
+
+
 def main():
     conv = json.load(open(os.path.join(HERE, "conviction_wallets.json")))
-    print(f"validating timing on {len(conv)} conviction wallets…\n", flush=True)
-    with ThreadPoolExecutor(max_workers=10) as ex:
-        profs = list(ex.map(lambda c: (c, lead_profile(c["wallet"])), conv))
-
-    sharps = []
-    for c, p in profs:
-        if p:
-            c["med_lead_h"] = round(p["med"], 1)
-            c["timing"] = p["verdict"]
-            if p["verdict"] == "sharp":
-                sharps.append(c)
-    # enrich the sharps with the exact stats the dashboard renders, so it reads them
-    # straight from the feed (1 request) instead of 3 data-api calls per wallet.
+    print(f"copy-testing {len(conv)} conviction wallets…\n", flush=True)
+    # run the full copy replay on EVERY conviction wallet (cheap now: fresh-positions
+    # resolution, clob only fills gaps), then select on copyability — not lead time.
     with ThreadPoolExecutor(max_workers=8) as ex:
-        for c, ds in zip(sharps, ex.map(lambda c: display_stats(c["wallet"]), sharps)):
-            c.update(ds)
-            if ds.get("name"):
-                c["name"] = ds["name"]          # real Polymarket username (else keep prefix)
+        stats = list(ex.map(lambda c: display_stats(c["wallet"]), conv))
 
-    # drop wallets that haven't traded in 30 days — the feed should only list
-    # currently-active sharps (last_trade comes from display_stats' /activity pull)
     cut30 = time.time() - 30 * 86400
-    before = len(sharps)
-    sharps = [c for c in sharps if (c.get("last_trade") or 0) >= cut30]
-    print(f"active filter: dropped {before - len(sharps)} sharp(s) inactive >30d -> {len(sharps)} active")
+    sharps = []
+    for c, ds in zip(conv, stats):
+        c.update(ds)
+        if ds.get("name"):
+            c["name"] = ds["name"]
+        lp = lead_profile(c["wallet"])
+        c["med_lead_h"] = round(lp["med"], 1) if lp else None
+        held_n = ds["held_won"] + ds["held_lost"]
+        held_wr = ds["held_won"] / held_n if held_n else 0
+        # SELECT a copyable sharp: active, copy-positive, and a genuine hold-to-
+        # resolution edge — held leg positive AND winning a clear majority on a real
+        # sample, so the edge survives live latency and isn't longshot variance or
+        # all sell-timing. A light lead floor drops true sub-hour snipers.
+        if ((ds["last_trade"] or 0) >= cut30 and ds["copy_pnl"] > 0
+                and ds["held_pnl"] > 0 and held_n >= MIN_HELD and held_wr >= MIN_HELD_WR
+                and (c["med_lead_h"] is None or c["med_lead_h"] >= MIN_LEAD_H)):
+            sharps.append(c)
 
-    sharps.sort(key=lambda c: (c["fwd_conv_roi"] is not None, c.get("fwd_conv_roi") or -9,
-                               c["train_conv_roi"]), reverse=True)
-
-    counts = {}
-    for c, p in profs:
-        counts[p["verdict"] if p else "no-data"] = counts.get(p["verdict"] if p else "no-data", 0) + 1
-    print(f"timing breakdown: {counts}")
-    print(f"COPYABLE SHARPS (median lead >= {COPYABLE_MED_LEAD:.0f}h): {len(sharps)}\n")
-
-    h = (f"{'tr_win':>7}{'tr_roi':>7}{'medLeadH':>9}{'fw_win':>7}{'fw_roi':>7}{'fw_n':>5}  wallet")
+    sharps.sort(key=lambda c: c["copy_pnl"], reverse=True)
+    print(f"copy-positive holders (copy>0, held>0, held_n>={MIN_HELD}, active, lead>={MIN_LEAD_H}h): "
+          f"{len(sharps)} of {len(conv)}\n")
+    h = f"{'copyP&L':>8}{'heldP&L':>8}{'held':>9}{'sold%':>6}{'medLeadH':>9}  wallet"
     print(h); print("-" * len(h))
-    for c in sharps[:30]:
-        fw = f"{c['fwd_win']:.0f}%" if c["fwd_win"] is not None else "—"
-        fr = f"{c['fwd_conv_roi']:+.0%}" if c["fwd_conv_roi"] is not None else "—"
-        print(f"{c['train_win']:>6.0f}%{c['train_conv_roi']:>+6.0%}{c['med_lead_h']:>9.0f}"
-              f"{fw:>7}{fr:>7}{c['fwd_n']:>5}  {c['wallet']}")
+    for c in sharps[:35]:
+        n = c["held_won"] + c["held_lost"]
+        sp = 100 * c["sold"] / (c["sold"] + n) if (c["sold"] + n) else 0
+        ld = f"{c['med_lead_h']:.0f}" if c["med_lead_h"] is not None else "—"
+        print(f"{c['copy_pnl']:>+8}{c['held_pnl']:>+8}{(str(c['held_won'])+'-'+str(c['held_lost'])):>9}"
+              f"{sp:>5.0f}%{ld:>9}  {(c.get('name') or c['wallet'][:10])}")
 
     json.dump(sharps, open(os.path.join(HERE, "watch_sharps.json"), "w"), indent=2)
-    print(f"\n-> watch_sharps.json ({len(sharps)} copyable sharps, last-minute wallets filtered out)")
+    print(f"\n-> watch_sharps.json ({len(sharps)} copy-positive holders)")
 
 
 if __name__ == "__main__":
