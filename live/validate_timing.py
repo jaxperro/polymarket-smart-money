@@ -14,6 +14,7 @@ it doesn't matter: either way the window is too tight to mirror.
 import json
 import os
 import statistics as st
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import cache
@@ -46,10 +47,16 @@ def display_stats(w):
     conv = [b for b in bets if b["size"] >= thr]                      # ALL conviction bets
     won = sum(1 for b in conv if b["won"])
     recent = sorted(bets, key=lambda b: b["res_t"] or 0, reverse=True)[:500]   # last 500 resolved
+    cut30 = time.time() - 30 * 86400
+    conv30 = [b for b in conv if (b["res_t"] or 0) >= cut30]          # conviction bets resolved in last 30d
+    won30 = sum(1 for b in conv30 if b["won"])
     out = {
         "conv_win": round(100 * won / len(conv), 1) if conv else None,
         "conv_won": won, "conv_lost": len(conv) - won,
         "conv_pnl": round(sum(_bet_pnl(b) for b in conv)),
+        "conv30_win": round(100 * won30 / len(conv30), 1) if conv30 else None,
+        "conv30_won": won30, "conv30_lost": len(conv30) - won30,
+        "conv30_pnl": round(sum(_bet_pnl(b) for b in conv30)),
         "realized_pnl": round(sum(_bet_pnl(b) for b in recent)),
         "avg_bet": round(sum(b["size"] for b in conv) / len(conv)) if conv else 0,  # avg conviction stake
         "name": None, "last_trade": 0, "last_conv_bet": 0,
