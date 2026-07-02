@@ -377,7 +377,10 @@ class Copybot:
         lag = st.get("lag", {})
         feed = {
             "mode": "live" if self.engine.ex.live else "paper",
-            "bankroll": bank, "stake": round(bank * self.cfg["bankroll_pct"], 2),
+            "bankroll": bank, "stake": round(self.engine.stake_usd(), 2),
+            "stake_pct": self.cfg["bankroll_pct"],
+            "event_cap": self.engine.risk.get("max_per_event"),
+            "hwm": round(st.get("hwm", 0.0), 2),
             "cash": round(cash, 2), "deployed": round(exp, 2),
             "realized": round(cash + exp - bank, 2), "open_count": len(mp),
             "fees_paid": round(st.get("fees_paid", 0.0), 2),
@@ -468,7 +471,7 @@ class Copybot:
 
     def summary(self, cycle):
         bank = self.cfg["bankroll_usd"]
-        stake = bank * self.cfg["bankroll_pct"]
+        stake = self.engine.stake_usd()       # dynamic: pct of current equity
         exp = self.engine.open_exposure()
         cash = self.engine.state.get("cash", bank)
         realized = cash + exp - bank          # see _drain_fills / settle_resolved

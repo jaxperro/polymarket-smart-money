@@ -30,6 +30,7 @@ Usage
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -49,8 +50,10 @@ DEFAULT_CONFIG = {
     "poll_seconds": 12,              # how often to check each wallet
     "discord_webhook": "",           # paste a Discord webhook URL to get pings
     "watchlist": [],                 # ["0xwallet1", "0xwallet2", ...]
-    "bankroll_usd": 1000.0,          # your stake pool
-    "bankroll_pct": 0.02,            # 2% of bankroll per new entry
+    "bankroll_usd": 1000.0,          # starting stake pool
+    "bankroll_pct": 0.02,            # fraction of CURRENT equity per new entry
+                                     # (compounds up and down; falls back to a flat
+                                     # fraction of bankroll_usd when cash isn't tracked)
     "price_guard_pct": 0.05,         # skip if price moved >5% from their fill
     "risk": {
         "max_trade_usd": 50.0,       # hard ceiling on any single copy
@@ -58,6 +61,8 @@ DEFAULT_CONFIG = {
         "daily_spend_cap_usd": 250.0,
         "max_total_exposure_usd": 500.0,
         "max_open_positions": 20,
+        "max_per_event": 2,          # max concurrent positions on one real-world
+                                     # event (a game's markets are one correlated bet)
         "min_price": 0.05,           # don't open longshots/near-certainties
         "max_price": 0.95,
         "min_order_usd": 5.0,        # Polymarket min order size
@@ -155,6 +160,16 @@ def recent_trades(wallet, limit=100):
                     {"user": wallet, "type": "TRADE", "limit": limit}) or []
 
 
+def event_key(t):
+    """Correlation-group id for a trade: the real-world event its market belongs
+    to. Polymarket sub-splits one game across several eventSlugs
+    (`…-2026-07-01-more-markets`, `…-2026-07-01-second-half-result`), so dated
+    slugs collapse to their `…-YYYY-MM-DD` prefix; undated slugs stand as-is."""
+    ev = t.get("eventSlug") or t.get("slug") or ""
+    m = re.match(r"(.*?\d{4}-\d{2}-\d{2})", ev)
+    return m.group(1) if m else (ev or None)
+
+
 # ── execution ────────────────────────────────────────────────────────────────
 
 class PaperExecutor:
@@ -243,6 +258,26 @@ class CopyTrader:
     def open_exposure(self):
         return sum(p["cost"] for p in self.state["my_pos"].values())
 
+    # ---- dynamic sizing: fraction of CURRENT equity, with a drawdown brake ----
+    DD_THRESHOLD = 0.80      # below 80% of the high-water mark…
+    DD_FACTOR = 0.5          # …bet half size until equity recovers
+
+    def stake_usd(self):
+        """Next bet size = bankroll_pct × current equity (cash + open cost basis),
+        so stakes compound with the book in both directions; halved while in a
+        >20% drawdown from the high-water mark. Falls back to the flat static
+        stake when cash isn't tracked (legacy poll CLI)."""
+        cash = self.state.get("cash")
+        if cash is None:
+            return self.cfg["bankroll_usd"] * self.cfg["bankroll_pct"]
+        eq = cash + self.open_exposure()
+        hwm = max(self.state.get("hwm", 0.0), eq)
+        self.state["hwm"] = hwm
+        frac = self.cfg["bankroll_pct"]
+        if eq < self.DD_THRESHOLD * hwm:
+            frac *= self.DD_FACTOR
+        return frac * eq
+
     def persist(self):
         self.state["seen_tx"] = list(self.seen)[-5000:]
         save_json(self.state_path, self.state)
@@ -295,7 +330,7 @@ class CopyTrader:
 
         if side == "BUY":
             self._handle_their_buy(wallet, token, their_size, their_price,
-                                   label, title, outcome)
+                                   label, title, outcome, event=event_key(t))
             their_book[token] = their_prev + their_size
         elif side == "SELL":
             self._handle_their_sell(token, their_size, their_prev, label)
@@ -317,7 +352,7 @@ class CopyTrader:
         return drift <= self.cfg["price_guard_pct"]
 
     def _handle_their_buy(self, wallet, token, their_size, their_price,
-                          label, title, outcome):
+                          label, title, outcome, event=None):
         mine = self.state["my_pos"].get(token)
         is_add = mine is not None
         # don't backfill: never open a position they already held when we
@@ -326,6 +361,17 @@ class CopyTrader:
         if not is_add and token in self.state["seed_tokens"].get(wallet, []):
             self.log(f"BUY  {label} — skip (held before we started, no backfill)")
             return
+        # correlation cap: a game's markets settle together — N bets on one event
+        # are one big bet, not N diversified ones (LSB1 once stacked 6 markets on
+        # a single match). Cap concurrent positions per real-world event.
+        cap = self.risk.get("max_per_event")
+        if not is_add and event and cap:
+            held = sum(1 for p in self.state["my_pos"].values()
+                       if p.get("event") == event)
+            if held >= cap:
+                self.log(f"BUY  {label} — skip (already {held} positions on this "
+                         f"event, cap {cap})")
+                return
 
         price = self._live_price(token, "buy")
         if price is None:
@@ -343,7 +389,7 @@ class CopyTrader:
             want_usd = want_shares * price
             kind = "ADD "
         else:
-            want_usd = self.cfg["bankroll_usd"] * self.cfg["bankroll_pct"]
+            want_usd = self.stake_usd()      # fraction of current equity (compounds)
             kind = "OPEN"
 
         pos_cost = mine["cost"] if is_add else 0.0
@@ -364,7 +410,7 @@ class CopyTrader:
         else:
             self.state["my_pos"][token] = {
                 "shares": res["filled_shares"], "cost": spent,
-                "title": title, "outcome": outcome}
+                "title": title, "outcome": outcome, "event": event}
         tag = "[PAPER]" if not self.ex.live else "[LIVE]"
         self.alert(
             f"{kind} {label} — {tag} buy {res['filled_shares']:.1f} "

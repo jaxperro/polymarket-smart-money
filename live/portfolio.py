@@ -10,20 +10,24 @@ RECYCLES correctly (cash frees at the true resolution moment). Output -> portfol
 which the dashboard reads in one request.
 
 Model: a $1,000 account that mirrors each followed wallet's CONVICTION bets (top-20%
-stake) at a flat $50, held to resolution (the cache has no sell events, which is the
-right model for the hold-to-resolution wallets we follow). Entries pay the Polymarket
-taker fee and a lag-slippage price haircut (see FEE_RATE / SLIP / LAG_EST_S) so the
-book models what a real copier nets, not the idealized zero-cost mirror. One position
-per market (first wallet to enter wins the slot); when capital is fully deployed a bet
-is MISSED.
+stake), held to resolution (the cache has no sell events, which is the right model for
+the hold-to-resolution wallets we follow). Sizing is DYNAMIC — each bet stakes PCT of
+current equity (Kelly-style compounding), halved in a >20% drawdown, capped at
+EVENT_CAP concurrent bets per real-world event — and entries pay the Polymarket taker
+fee plus a lag-slippage price haircut (FEE_RATE / SLIP / LAG_EST_S), so the book
+models what a real copier nets, not the idealized zero-cost mirror. One position per
+market (first wallet to enter wins the slot); when capital is fully deployed a bet is
+MISSED.
 Resolved history + realized P&L come from the cache; currently-open bets come from a
 small live /positions pull so the page can still show what's in flight.
 """
 import json
 import os
+import re
 import ssl
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 import cache
 import smart_money as sm
@@ -32,14 +36,25 @@ _SSL = ssl._create_unverified_context()
 
 HERE = os.path.dirname(__file__)
 BANK = 1000.0
-STAKE = 50.0
 START = time.mktime(time.strptime("2026-06-01", "%Y-%m-%d"))   # backfilled: replay from June 1
 GAMMA = "https://gamma-api.polymarket.com"
 
+# ---- dynamic sizing (mirrors the live copybot) ------------------------------
+# Each new bet stakes PCT of CURRENT equity (cash + open cost basis) so the book
+# compounds in both directions; the stake is halved while equity sits below
+# DD_THRESHOLD of its high-water mark, and clamped to [STAKE_MIN, STAKE_CAP].
+# EVENT_CAP limits concurrent bets whose markets belong to the same real-world
+# event — a game's markets settle together, so N bets on one match are one
+# correlated bet, not N diversified ones.
+PCT = 0.04
+STAKE_MIN, STAKE_CAP = 5.0, 150.0
+EVENT_CAP = 2
+DD_THRESHOLD, DD_FACTOR = 0.80, 0.5
+
 # ---- realism model (matches the live copybot) -------------------------------
 # Taker fee (Polymarket V2, since 2026-03-30): fee = shares·rate·p·(1−p); for a
-# flat-$STAKE buy that's STAKE·rate·(1−p). Sports 0.03 — the follow set's
-# category. Redeeming at resolution is fee-free, so only entries pay here
+# $stake buy that's stake·rate·(1−p). Sports 0.03 — the follow set's category.
+# Redeeming at resolution is fee-free, so only entries pay here
 # (hold-to-resolution model, no mirrored exits).
 FEE_RATE = 0.03
 # Copy lag: we enter LAG_EST_S after the wallet does, at a slightly worse price.
@@ -57,17 +72,26 @@ WALLETS = [
 ]
 
 
-def entry_model(p):
-    """(effective entry price, entry fee, total cash cost) of a flat-$STAKE copy:
+def entry_model(p, stake):
+    """(effective entry price, entry fee, total cash cost) of a $stake copy:
     price worsened by the lag-slippage haircut, taker fee on top of the stake."""
     p_eff = min(0.999, p * (1 + SLIP))
-    fee = STAKE * FEE_RATE * (1 - p_eff)
-    return p_eff, fee, STAKE + fee
+    fee = stake * FEE_RATE * (1 - p_eff)
+    return p_eff, fee, stake + fee
 
 _MKT = {}
+_SLUG_CACHE = os.path.join(HERE, "slug_cache.json")
+try:
+    _MKT.update(json.load(open(_SLUG_CACHE)))
+except Exception:
+    pass
+
+
 def market_meta(cond):
-    """Market title for display, from the CLOB market endpoint (gamma's condition_ids
-    filter returns nothing for resolved markets) — cached."""
+    """Market title + slug from the CLOB market endpoint (gamma's condition_ids
+    filter returns nothing for resolved markets) — cached in-process AND on disk
+    (slug_cache.json), since the event cap needs a slug for every replayed market,
+    not just the top-60 displayed."""
     if cond not in _MKT:
         try:
             r = urllib.request.urlopen(urllib.request.Request(
@@ -76,8 +100,24 @@ def market_meta(cond):
             m = json.loads(r.read())
             _MKT[cond] = {"title": m.get("question") or "", "slug": m.get("market_slug") or ""}
         except Exception:
-            _MKT[cond] = {"title": "", "slug": ""}
+            return {"title": "", "slug": ""}      # transient failure — don't cache
     return _MKT[cond]
+
+
+def save_slug_cache():
+    try:
+        json.dump({c: v for c, v in _MKT.items() if v.get("slug")},
+                  open(_SLUG_CACHE, "w"))
+    except Exception:
+        pass
+
+
+def event_key(slug):
+    """Correlation-group id: Polymarket sub-splits one game across slugs
+    (`…-2026-07-01-more-markets`, `…-2026-07-01-second-half-result`), so dated
+    slugs collapse to their `…-YYYY-MM-DD` prefix; undated slugs stand as-is."""
+    m = re.match(r"(.*?\d{4}-\d{2}-\d{2})", slug or "")
+    return m.group(1) if m else (slug or None)
 
 
 def conviction_bets():
@@ -145,13 +185,28 @@ def main():
             b["kind"] = "open"; by_mkt[b["cond"]] = b
     stream = sorted(by_mkt.values(), key=lambda b: b["entry_t"])
 
+    # prefetch every replayed market's slug (threaded; disk-cached) so the
+    # event-correlation cap can group markets by real-world event
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(market_meta, {b["cond"] for b in stream}))
+
     cash = BANK
     realized = 0.0
     fees_paid = 0.0
+    hwm = BANK
+    capped = 0
     held = []        # (free_t, cost, payoff)  cost = stake + entry fee; payoff paid at free_t
     perW = {w["wallet"]: {"name": w["name"], "wallet": w["wallet"], "bets": 0,
                           "invested": 0.0, "realized": 0.0} for w in WALLETS}
     resolved, current, missed = [], [], []
+
+    def cur_stake():
+        """PCT of current equity, drawdown-braked, clamped — the copybot's rule."""
+        nonlocal hwm
+        eq = cash + sum(c for _, c, _, _ in held)
+        hwm = max(hwm, eq)
+        frac = PCT * (DD_FACTOR if eq < DD_THRESHOLD * hwm else 1.0)
+        return max(STAKE_MIN, min(STAKE_CAP, frac * eq))
 
     def free(upto):
         nonlocal cash, realized
@@ -167,16 +222,26 @@ def main():
 
     for b in stream:
         free(b["entry_t"])
-        p_eff, fee, cost = entry_model(b["p"])
+        stake = cur_stake()
+        b["stake"] = round(stake, 2)
+        b["event"] = event_key(market_meta(b["cond"])["slug"])
+        # correlation cap: skip a bet when we already hold EVENT_CAP positions on
+        # the same real-world event (deliberate risk skip, tallied separately)
+        if b["event"] and sum(1 for _, _, _, r in held
+                              if r.get("event") == b["event"]) >= EVENT_CAP:
+            b["capped"] = True; capped += 1
+            missed.append(b)
+            continue
+        p_eff, fee, cost = entry_model(b["p"], stake)
         if cash >= cost:
             cash -= cost; fees_paid += fee; perW[b["wallet"]]["bets"] += 1
-            shares = STAKE / p_eff                        # lag-adjusted entry price
+            shares = stake / p_eff                        # lag-adjusted entry price
             if b["kind"] == "res":
                 payoff = shares * (1.0 if b["won"] else 0.0)   # redeem is fee-free
                 held.append((b["res_t"] or now, cost, payoff, b))
             else:                                          # currently open -> mark to market, no free yet
                 held.append((None, cost, 0.0, b))
-                b["val"] = shares * b["cur"]; b["stake"] = STAKE
+                b["val"] = shares * b["cur"]
         else:
             missed.append(b)
     free(now)
@@ -200,10 +265,11 @@ def main():
     # indexing m["won"] here used to KeyError and kill the whole portfolio step
     # the first time capital ran out while a followed wallet had a live position.
     def hypo_pnl(m):
-        p_eff, fee, cost = entry_model(m["p"])
+        stake = m.get("stake") or STAKE_MIN
+        p_eff, fee, cost = entry_model(m["p"], stake)
         if "won" in m:
-            return (STAKE / p_eff) - cost if m["won"] else -cost
-        return STAKE * (m.get("cur", p_eff) / p_eff) - cost
+            return (stake / p_eff) - cost if m["won"] else -cost
+        return stake * (m.get("cur", p_eff) / p_eff) - cost
 
     missed.sort(key=lambda m: m.get("res_t") or 0, reverse=True)
     for m in missed[:60]:
@@ -219,7 +285,9 @@ def main():
     equity = cash + invested
     out = {
         "started": START, "updated": now,
-        "bank": BANK, "stake": STAKE,
+        "bank": BANK, "stake": round(cur_stake(), 2),   # the NEXT bet's size
+        "stake_pct": PCT, "event_cap": EVENT_CAP, "hwm": round(hwm, 2),
+        "dd_threshold": DD_THRESHOLD, "capped_count": capped,
         "fee_rate": FEE_RATE, "slip": SLIP, "lag_est_s": LAG_EST_S,
         "fees_paid": round(fees_paid, 2),
         "equity": round(equity, 2), "liquid": round(cash, 2), "invested": round(invested, 2),
@@ -232,20 +300,23 @@ def main():
                      "conv_thr": conv_thr.get(v["wallet"], 1e12)}
                     for v in perW.values()],
         "current": [{"title": c.get("title", ""), "name": c["name"], "outcome": c.get("outcome", ""),
-                     "stake": STAKE, "val": round(c["val"], 2), "pnl": round(c["pnl"], 2),
+                     "stake": c.get("stake"), "val": round(c["val"], 2), "pnl": round(c["pnl"], 2),
                      "end": c.get("end")} for c in sorted(current, key=lambda c: c["entry_t"])],
         "resolved": [{"title": r.get("title", ""), "name": r["name"], "won": r["won"],
-                      "stake": STAKE, "pnl": round(r["pnl"], 2), "date": r.get("res_t")}
+                      "stake": r.get("stake"), "pnl": round(r["pnl"], 2), "date": r.get("res_t")}
                      for r in resolved[:60]],
         "missed": [{"title": m.get("title", ""), "name": m["name"], "won": m.get("won"),
-                    "stake": STAKE, "pnl": round(m["pnl"], 2), "date": m.get("res_t")}
+                    "stake": m.get("stake"), "capped": bool(m.get("capped")),
+                    "pnl": round(m["pnl"], 2), "date": m.get("res_t")}
                    for m in missed[:60]],
         "missed_pnl": round(sum(hypo_pnl(m) for m in missed), 2),
     }
     json.dump(out, open(os.path.join(HERE, "portfolio.json"), "w"), separators=(",", ":"))
+    save_slug_cache()
     print(f"portfolio: equity ${equity:,.0f} ({(equity-BANK)/BANK*100:+.0f}%) | realized ${realized:+,.0f} "
-          f"| fees ${fees_paid:,.0f} | {len(resolved)} resolved ({wins}W/{len(resolved)-wins}L) "
-          f"| {len(current)} open | {len(missed)} missed | -> portfolio.json", flush=True)
+          f"| fees ${fees_paid:,.0f} | next stake ${cur_stake():,.0f} | {len(resolved)} resolved "
+          f"({wins}W/{len(resolved)-wins}L) | {len(current)} open | {len(missed)} missed "
+          f"({capped} event-capped) | -> portfolio.json", flush=True)
 
 
 if __name__ == "__main__":
