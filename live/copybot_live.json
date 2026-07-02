@@ -1,7 +1,10 @@
 {
  "mode": "paper",
  "bankroll": 1000.0,
- "stake": 50.0,
+ "stake": 37.97,
+ "stake_pct": 0.04,
+ "event_cap": 2,
+ "hwm": 949.31,
  "cash": 949.31,
  "deployed": 0,
  "realized": -50.69,
@@ -39,5 +42,5 @@
    "settled": 1783001640
   }
  ],
- "updated": 1783002752
+ "updated": 1783004151
 }
