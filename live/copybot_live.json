@@ -3,7 +3,7 @@
  "bankroll": 1000.0,
  "stake": 37.97,
  "stake_pct": 0.04,
- "event_cap": 2,
+ "event_cap": 0,
  "hwm": 949.31,
  "cash": 949.31,
  "deployed": 0,
@@ -44,5 +44,5 @@
  ],
  "missed": [],
  "missed_pnl": 0,
- "updated": 1783004916
+ "updated": 1783005732
 }
