@@ -40,8 +40,8 @@
     "max_entry": 1.0
   },
   "risk": {
-    "max_trade_usd": 150.0,
-    "max_position_usd": 150.0,
+    "max_trade_usd": 1000000.0,
+    "max_position_usd": 1000000.0,
     "daily_spend_cap_usd": 1000000.0,
     "max_total_exposure_usd": 1000000.0,
     "max_open_positions": 1000,

@@ -47,7 +47,7 @@ GAMMA = "https://gamma-api.polymarket.com"
 # event (a game's markets settle together — one correlated bet, not N diversified
 # ones); 0 = off, mirror every conviction trade.
 PCT = 0.04
-STAKE_MIN, STAKE_CAP = 5.0, 150.0
+STAKE_MIN, STAKE_CAP = 5.0, float("inf")   # uncapped — 4% of equity rides fully
 EVENT_CAP = 0
 DD_THRESHOLD, DD_FACTOR = 0.80, 0.5
 
