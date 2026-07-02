@@ -2,16 +2,16 @@
  "mode": "paper",
  "bankroll": 1000.0,
  "stake": 50.0,
- "cash": 1000.0,
+ "cash": 949.31,
  "deployed": 0,
- "realized": 0.0,
+ "realized": -50.69,
  "open_count": 0,
- "fees_paid": 0.0,
+ "fees_paid": 0.69,
  "fee_rate": 0.03,
  "lag": {
-  "n": 0,
-  "avg_s": null,
-  "avg_slip_pct": null
+  "n": 1,
+  "avg_s": 64.1,
+  "avg_slip_pct": 0.0189
  },
  "wallets": [
   "Kruto2027",
@@ -19,6 +19,25 @@
   "fortuneking",
   "LSB1"
  ],
- "bets": [],
- "updated": 1782999925
+ "bets": [
+  {
+   "token": "49050515224512144893403630474493192388276540052107403943769923572957881420203",
+   "wallet": "0x86c878cde72660ec52f5e6f0f0438b76de8fc867",
+   "name": "fortuneking",
+   "outcome": "Timo Legout",
+   "title": "Cary: Rei Sakamoto vs Timo Legout",
+   "their_price": 0.53,
+   "my_price": 0.54,
+   "slippage_pct": 0.0189,
+   "shares": 92.59,
+   "cost": 50.0,
+   "fee": 0.69,
+   "opened": 1783001516,
+   "status": "lost",
+   "exit_price": 0.0,
+   "pnl": -50.69,
+   "settled": 1783001640
+  }
+ ],
+ "updated": 1783001642
 }
