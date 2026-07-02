@@ -1,19 +1,68 @@
 # 🏆 Winning Wallet Finder
 
 Find Polymarket wallets with a **real, statistically-verifiable edge**, test
-whether copying them actually makes money, **get pinged the moment they trade**,
-and watch a **live $1,000 paper portfolio** follow them in real time.
+whether copying them actually makes money — **with real fees, lag, and
+slippage** — and copy-trade them with a 24/7 bot (paper today, live-capable).
 
 This started as "copy the smart money." Along the way we tested — and ruled out
 — six systematic public-data strategies, and found that the *only* signal that
 holds up is **statistical improbability**: wallets that win far more than the
-prices they paid imply. This repo is the tooling for finding and watching those
-wallets, plus an honest record of everything that didn't work.
+prices they paid imply. This repo is the tooling for finding, validating, and
+copying those wallets, plus an honest record of everything that didn't work.
 
-> **Read [`FINDINGS.md`](FINDINGS.md) for the full story.** TL;DR: detection of
-> edge wallets works; *profitably copying them* is unproven (it survived a naive
-> backtest but collapsed to one-wallet variance out-of-sample). Treat this as a
-> research + monitoring tool, not a money printer.
+> **Read [`FINDINGS.md`](FINDINGS.md) for the research story.** TL;DR: detection
+> works; profitable copying is *plausible but unproven* — every backtest here is
+> in-sample by construction, and **the July 2026 forward test (live now) is the
+> arbiter.** Treat headline returns as ceilings, not forecasts.
+
+---
+
+## The system today (July 2026)
+
+Three deployed pieces + one static dashboard:
+
+| piece | where it runs | what it does |
+|-------|--------------|--------------|
+| **daily pipeline** (`live/daily.sh`) | this Mac, launchd 10:00 | refresh the bet cache → 5-gate skill scan → fee-aware sharp selection → conviction floors → backtest book → publish JSON feeds to GitHub |
+| **copybot worker** (`copybot.py` via `host/start.sh`) | Railway, 24/7 | polls the 4 followed wallets every 60s, paper-copies their conviction bets with real fees/lag/slippage accounting, settles at CLOB resolution, commits its book back to the repo |
+| **Discord watcher** (`webhook_receiver.py`) | Railway `web` service | Alchemy address-activity webhook → instant trade pings |
+| **dashboard** | [jaxperro.com/trading](https://jaxperro.com/trading) (static, in the `jaxperro` repo) | renders the three JSON feeds: live bot book, backtest book, sharp table |
+
+**The July 2026 live test:** a fresh $1,000 paper book (started 2026-07-02, on
+Railway) following **Kruto2027, shisan888, fortuneking, LSB1** — the top
+fee-adjusted copy-positive sharps + one curated pick. Every fill records
+detection lag, price slippage, and the taker fee; missed bets are recorded and
+settled hypothetically. If this month's *measured* numbers hold up, real money
+follows (see [`LIVE_TEST.md`](LIVE_TEST.md)).
+
+```
+ data layer          selection                        execution              display
+ ──────────          ─────────                        ─────────              ───────
+ live/cache.duckdb ─▶ skill.py (5-gate funnel)        copybot.py (Railway) ─▶ jaxperro.com/trading
+ (schema v2:          conviction_scan.py (p80 bets)   · 4%-of-equity stakes   · copybot_live.json
+  33k wallets,        validate_timing.py (fee-aware   · taker fees modeled    · portfolio.json
+  19M resolved bets,   copy replay → watch_sharps)    · lag/slip per fill     · watch_sharps.json
+  token-keyed,        portfolio.py (backtest book)    · missed-bet ledger
+  archival)           sync_floors.py (bot parity)     · CLOB settle + redeem
+```
+
+---
+
+## File map
+
+| path | role |
+|------|------|
+| `live/` | **the current system**: cache, scanners, sharp selection, backtest, daily pipeline ([live/README](live/README.md)) |
+| `copybot.py` | the copy-trading bot: push/poll trigger → follow filter → execution engine (paper + live) |
+| `archive/copytrade.py` | the execution engine the bot reuses: sizing, risk gates, price guard, paper/live executors |
+| `host/start.sh` | 24/7 worker bootstrap for Railway/Fly/VPS (clones repo, resumes committed state) |
+| `LIVE_TEST.md` · `preflight_live.py` · `redeem.py` | real-money runbook, read-only credential preflight, on-chain redemption |
+| `insider.py` | the original detector: z-score, pre-resolution timing, fresh-wallet flags, funding-cluster rings |
+| `smart_money.py` | shared HTTP helper + survivorship-corrected win-rate dashboard (`:8899`) |
+| `webhook_receiver.py` | Alchemy webhook → Discord trade pings (Railway `web` service) |
+| `wide/` | frozen-subgraph bulk scanner (1.76M wallets, historical only — subgraph froze Jan 2026) |
+| `archive/` | the six strategies that didn't work, kept honest ([archive/README](archive/README.md)) |
+| `hunt.py` · `huntwide.py` · `oos.py` · `copyback.py` | earlier research sweeps/backtests (superseded by `live/`) |
 
 ---
 
@@ -28,81 +77,89 @@ z = (actual wins − expected wins) / standard deviation
 ```
 
 - **z = 0** → you won exactly what your prices implied → no edge.
-- **z = 3** → ~1-in-740 by luck. **z = 5** → ~1-in-3.5M. **z = 9** → astronomical.
-- **`p(luck)`** is z as a probability: the chance a no-edge bettor does this well by chance.
+- **z = 3** → ~1-in-740 by luck. **z = 5** → ~1-in-3.5M.
 
-Why this beats win rate: a wallet that bets longshots and **wins 14% when the
-odds implied 8%** has a huge edge (high z) despite a low win rate. A wallet
-buying 90¢ favorites and winning 90% has z≈0 — no edge, just paying for
-favorites. **z measures beating the prices you paid.**
-
-Two refinements separate signal from noise:
-- **Lifetime trade count** — high z + tens of thousands of trades = a
-  market-maker bot, not an insider. Real edge wallets have *concentrated* edge
-  over a few thousand trades.
-- **Pre-resolution timing + fresh wallet** — entering minutes/hours before
-  resolution on a new account is the insider fingerprint (the Bubblemaps /
-  *60 Minutes* pattern).
+Why this beats win rate: a wallet that bets longshots and wins 14% when the odds
+implied 8% has a huge edge (high z) despite a low win rate; a wallet buying 90¢
+favorites and winning 90% has z≈0. Win rate is also **survivorship-biased** on
+Polymarket (losing shares sit unredeemed and invisible — see FINDINGS). And even
+true win rate **over-counts scalpers** — so the final selection metric is
+**fee-adjusted Copy P&L**: what a flat-$50 copy of the wallet's conviction bets
+*actually* returns after taker fees (replay entries, mirror exits, settle at
+CLOB resolution). Judge by Copy P&L, never win rate.
 
 ---
 
-## How the pieces fit
-
-```
- data layer        detection           hunting              validation          live system
- ──────────        ─────────           ───────              ──────────          ───────────
- smart_money.py ─▶ insider.py     ──▶  hunt.py / huntwide ▶ copyback / oos.py ▶ webhook_receiver.py ─▶ Discord ping
- (Polymarket API,  (z-score, timing,   (sweep markets,      (does copying them   (Alchemy webhook)
-  true win rate)    freshness, funding  surface edge         actually pay? in- &  trading/ (paper) ────▶ live $1k
-                    clustering)         wallets)             out-of-sample)       jaxperro.com/trading   portfolio
-```
-
-| File | Role |
-|------|------|
-| `insider.py` | **The detector.** z-score/p-value, pre-resolution timing, fresh-wallet & sizing flags, and Alchemy funding-cluster ring detection. `--scan` / `--market` / `--wallet`. |
-| `smart_money.py` | Data foundation + dashboard. Survivorship-corrected **true** win rate. |
-| `hunt.py` | Ring-hunt sweep over a fixed list of news-driven event markets. |
-| `huntwide.py` | Wide sweep — source wallets from ~100 markets, score each, tier by z. |
-| `copyback.py` | Backtest: copy edge wallets' entries from a date, weighted, compounding. |
-| `oos.py` | **Out-of-sample test** — select wallets on pre-period data, copy forward. The honesty gate. |
-| `webhook_receiver.py` | Push-based live watcher: Alchemy on-chain webhook → enrich → Discord. |
-| `watch.json` | The tracked wallet set + edge weights (shared by the watcher and the tracker). |
-| paper tracker | Client-side `$1,000` running portfolio → [jaxperro.com/trading](https://jaxperro.com/trading) (page lives in the personal site repo). |
-| **`live/`** | **The current scanner** — find & track the skilled ~3% from the live API at scale: enumerate → cache → 5-gate skill funnel → dashboard → daily refresh. Caches ~26k wallets / 12.5M bets locally so every re-score is seconds. ([live/README](live/README.md)) |
-| `wide/` | Bulk subgraph→DuckDB scanner: survivorship-bias-free over all 1.76M wallets, but the public subgraph is **frozen at Jan 2026**, so it's a historical tool only. ([wide/README](wide/README.md)) |
-| `archive/` | The six strategies that didn't work, kept for reference ([details](archive/README.md)). |
-
----
-
-## Quickstart
-
-Zero dependencies — Python 3 stdlib only (no `pip install`). macOS python.org
-builds lack CA certs, so the code falls back to unverified SSL for these public
-read-only APIs.
+## Quickstart for a new developer
 
 ```bash
 git clone https://github.com/jaxperro/winning-wallet-finder
 cd winning-wallet-finder
-cp config.example.json config.json     # then edit (see Config below)
+pip3 install duckdb                    # the only dep for research/selection
+cp config.example.json config.json     # secrets live here (gitignored)
 
-python3 insider.py --scan 40           # score the top-40 leaderboard wallets
-python3 insider.py --market <slug>     # score a market's traders + detect rings
-python3 insider.py --wallet 0xABC…     # deep-profile one wallet
-python3 huntwide.py                    # wide sweep → huntwide.csv (tiered by z)
-python3 oos.py                         # the out-of-sample copy test
-python3 smart_money.py                 # dashboard at http://localhost:8899
+# selection layer (live/) — everything reads the local bet cache
+cd live
+python3 enumerate.py 30                # build a candidate pool (last 30d markets)
+python3 collect.py                     # pull their bets into cache.duckdb (resumable)
+python3 skill.py                       # 5-gate skill funnel -> watch_skilled.json
+python3 conviction_scan.py             # conviction-bet profile scan
+python3 validate_timing.py             # fee-aware copy replay -> watch_sharps.json
+python3 portfolio.py                   # the backtest book -> portfolio.json
+./daily.sh                             # or: the whole thing, end to end
+
+# copy bot (repo root) — paper by default, no orders ever without --live
+python3 copybot.py --config live/copybot.paper.json --state /tmp/s.json --poll 60
+python3 copybot.py --test-wallet 0x…   # dry-run one wallet's latest trade
+
+# live trading (real money): read LIVE_TEST.md, then
+pip3 install py-clob-client web3
+python3 preflight_live.py              # read-only credential/balance check
 ```
 
-### Config (`config.json`, gitignored — holds your secrets)
+The cache is the point: **every score re-runs in seconds from
+`live/cache.duckdb`** (~33k wallets / 19M+ resolved bets) instead of hours of
+API pulls. Schema v2 is token-keyed, provenance-tagged, and archival (refreshes
+upsert instead of wiping; failed pulls are never cached as "no bets") — details
+in [`live/README.md`](live/README.md).
 
-```jsonc
-{
-  "discord_webhook": "https://discord.com/api/webhooks/…",  // alerts
-  "alchemy_key": "…",            // Polygon RPC for funding-cluster detection
-  "alchemy_signing_key": "…",    // verifies inbound webhook POSTs (live watcher)
-  "watch": [ {"wallet": "0x…", "name": "Famecesgoal"}, … ]  // wallets to track
-}
-```
+### Config & secrets (all gitignored)
+
+| file | holds |
+|------|-------|
+| `config.json` | Discord webhooks, Alchemy key, the followed-wallet list + per-wallet conviction floors (auto-refreshed daily by `sync_floors.py`) |
+| `config.live.json` | live-trading credentials (`private_key`, `funder_address`) + tiny test caps — see `LIVE_TEST.md` |
+| Railway `copybot` service | `GITHUB_TOKEN` (fine-grained PAT, contents-RW on this repo — the bot commits its state/feed back), optional `DISCORD_WEBHOOK` |
+
+---
+
+## How the copy bot models reality
+
+The whole point of the July test is that paper ≈ live. Every mechanism the
+backtest and bot share:
+
+- **Taker fees** (Polymarket V2, since 2026-03-30): `fee = shares × rate × p(1−p)`,
+  sports rate 0.03 — charged on every marketable entry and exit; redeeming at
+  resolution is free. Fee-adjusted Copy P&L also drives *selection*.
+- **Lag + slippage**: the bot fills at the live CLOB ask at detection (~60s poll),
+  logging per-fill `detect_lag_s` and `slippage_pct`; the backtest applies a
+  +0.5%/~90s haircut. Measured so far: 64s / +1.9% on the first live-sports fill.
+- **Dynamic sizing**: each bet stakes **4% of current equity** (compounds both
+  ways), halved while equity is below 80% of its high-water mark. No per-trade
+  cap. A per-event correlation cap exists (`risk.max_per_event`) but is **off** —
+  every conviction trade is followed.
+- **Conviction filter**: only copy a wallet's top-20%-by-stake bets (per-wallet
+  p80 floor, kept in sync with the dashboard by `sync_floors.py`).
+- **Missed-bet ledger**: every bet the bot *couldn't* take (cash deployed, price
+  guard) is recorded and settled hypothetically — capacity costs are measured,
+  not invisible.
+- **Settlement**: winners settle at authoritative CLOB winner flags; live mode
+  auto-redeems on-chain (`redeem.py`; neg-risk markets need manual redeem).
+
+Safety: paper is the default; live requires `mode:"live"` **and** `--live`
+**and** a typed confirmation phrase, under hard caps. The GH-Actions cron
+runner is retired (GitHub throttled `*/5` to ~2h in practice — it copied 1 of
+~104 qualifying trades in June; the always-on Railway poller replaced it).
 
 ---
 
@@ -110,126 +167,50 @@ python3 smart_money.py                 # dashboard at http://localhost:8899
 
 | Source | Used for |
 |--------|----------|
-| `data-api.polymarket.com` | positions, trades, leaderboard, activity, true win rate |
-| `gamma-api.polymarket.com` | market metadata, resolution times, best bid/ask |
-| `clob.polymarket.com` | order books, prices, liquidity-reward configs |
-| `api.elections.kalshi.com` | Kalshi prices (cross-venue arb research) |
-| Alchemy (Polygon) | on-chain USDC funding traces + the live trade webhook |
+| `data-api.polymarket.com` | positions, trades, activity (+`eventSlug`), leaderboard |
+| `gamma-api.polymarket.com` | market metadata (NB: `condition_ids` filter returns nothing for resolved markets) |
+| `clob.polymarket.com` | order books, prices, **authoritative resolution** (`winner` flags), market slugs |
+| Alchemy (Polygon) | funding-cluster traces + the live trade webhook |
 
 ---
 
-## The live system
+## The research (how we got here)
 
-Two always-on pieces, both running on near-zero infrastructure cost. The wallets
-they track live in `watch.json` (currently the **4 sharpest, followable**
-wallets — high z, not bots, not in-game — re-weighted by z).
+**The 5-gate funnel** (`live/skill.py`): a wallet is "skilled" only if it clears
+`n ≥ 15 resolved bets` → `z > 0` → `Benjamini–Hochberg FDR @5%` → `split-half
+out-of-sample persistence` → `not a market-maker` (all resolved-only: early-sold
+positions in unended markets are marks, not outcomes, and never score).
 
-### 1. Discord watcher — pinged on every trade (`webhook_receiver.py`)
+**The clean test (June 2026):** high-win-rate "favorite-rider" wallets looked
++23.6% in-sample and lost −7.4% once selected without look-ahead — exactly the
+LBS/Yale "~60% of lucky winners become losers" result. **Don't copy win rates.**
 
-Push-based, no polling. The instant a tracked wallet's proxy transacts on
-Polygon (~2–5s), Alchemy POSTs the receiver, which enriches the trade via the
-data-API and pings Discord: `🟢 Famecesgoal BUY Yes @ 0.34 ($120) — <market>`.
-It's a tiny stdlib HTTP server that idles at ~zero CPU between trades.
+**The repeatable find:** score wallets on their **conviction bets** (top 20% by
+stake, per-wallet p80) — the edge is wallets that win 70–80% on genuinely
+uncertain (~0.4–0.6) markets. Trained pre-June, validated June: 62/83 stayed
+profitable forward (p≈0). A **fee-aware flat-$50 copy replay** then keeps only
+wallets that are actually profitable to *copy* (scalpers with ~100% shown win
+rates lose money when copied) → currently **12 copy-positive holders** in
+`watch_sharps.json`, refreshed daily.
 
-1. **Discord webhook** → set `DISCORD_WEBHOOK` env (or `config.json`).
-2. **Deploy** the receiver to an always-on host (Railway / Fly / a $5 VPS — *not*
-   Render free, it sleeps). `Procfile`, `requirements.txt`, `nixpacks.toml`
-   included; binds to `$PORT`, exposes `/alchemy` (POST) and `/health` (GET).
-3. **Alchemy** → create an *Address Activity* webhook (Polygon mainnet), add the
-   `watch.json` addresses, point it at `https://your-host/alchemy`, set the
-   signing key as `ALCHEMY_SIGNING_KEY` (turns on HMAC verification).
+**The backtest** (`live/portfolio.py`): the followed four, June 1 → now, with
+fees/lag/dynamic sizing: **+531%** — but June is the month these wallets were
+*selected on*, so that's an in-sample ceiling. July, live, is the test.
 
-Keep the two wallet lists in sync: Alchemy's address list (what *triggers*) and
-`watch.json` (what *names* the alert).
-
-### 2. Live paper portfolio — `trading/` → [jaxperro.com/trading](https://jaxperro.com/trading)
-
-A **$1,000 paper account that behaves like real money**: it mirrors each followed
-wallet's **conviction** bets (top 20% of their own stake sizes) at $50/trade,
-**enters when they enter** (if there's cash), holds to resolution, then settles
-and frees the cash. Shows **Liquid**, **Invested**, **Realized**, a **Current
-Bets** table, and **Missed P&L** (profit skipped when the bankroll was fully
-deployed — the cost of a small account).
-
-It's now **precomputed server-side off the cache** (`live/portfolio.py` →
-`portfolio.json`) rather than replayed in the browser: the cache stores each bet's
-resolution time, so capital **recycles at the true resolution moment** (the
-client replay used to phantom-lock capital when the data-api lacked resolution
-dates). The page is a static renderer of `portfolio.json` + `watch_sharps.json`,
-with the old client-side replay kept as a fallback.
-
-> **What the tracker taught us:** $1,000 across many hyperactive wallets saturates
-> instantly — concentrate on a few wallets that fit the bankroll. And **win% lies
-> about copyability**: judge candidates by **Copy P&L** (the sharps table's headline
-> column — actual flat-$50 copy result, scalpers exposed), not win rate. *Actually
-> placing* the trades is a separate in-progress system (`copybot.py`); this repo is
-> selection + paper tracking.
-
----
-
-## The skilled-wallet scanner (`live/`)
-
-The newest pipeline operationalizes the [LBS/Yale finding](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5910522)
-that ~3% of accounts are genuinely skilled. It scans the **live** data-api at
-scale and tracks the survivors forward.
-
-**The 5-gate funnel** — a wallet is "skilled" only if it clears all five:
-`n ≥ 15 resolved bets` → `z > 0` (beats its entry prices) → `Benjamini–Hochberg
-FDR @5%` → `split-half out-of-sample persists` → `not a market-maker/bot`. Win
-rate is never a gate.
-
-**The cache makes it cheap.** Each wallet's full resolved-bet history is pulled
-once into `cache.duckdb` (~26k wallets / 12.5M bets), keyed with per-bet
-resolution times — so any cutoff (pre-June-1, full-window, archetypes) re-scores
-in **seconds** instead of hours of API pulls.
-
-**The clean out-of-sample result (June 2026).** Copying the "favorite-rider"
-skilled wallets, $1000, no execution lag:
-
-| Selection | Win rate | Forward P&L (June 1+) |
-|-----------|----------|-----------------------|
-| In-sample (peeks at test window) | 99% | **+23.6%** |
-| **Clean (pre-June-1 data only)** | 68% | **−7.4%** (−19% on settled) |
-
-The +23.6% was pure selection bias. Selected honestly, the favorites **lose** —
-exactly the paper's "~60% of lucky winners become losers out-of-sample." High
-win rate ≠ edge, again. (The `value`/longshot archetype — wallets that beat
-*underdog* prices — is the one worth testing next.) Full pipeline in
-[`live/README.md`](live/README.md).
-
-**What does work (the repeatable find).** Scoring wallets on their **high-
-conviction bets — the top 20% by stake size (per-wallet p80, not a flat $200)** —
-which win 70–80% on genuinely-uncertain (~0.4–0.6)
-markets — trained pre-June and validated June: **62/83 stayed profitable forward
-(p≈0)**. A lead-time gate (`validate_timing.py`) then drops wallets whose wins come
-too close to resolution to mirror — "last-minute" entries (median lead <24h), which
-may be genuine insiders or just fast-market specialists — plus anyone inactive >30d,
-leaving **~31 validated copyable sharps** (`watch_sharps.json`), surfaced live on
-[jaxperro.com/trading](https://jaxperro.com/trading).
-
-**The catch — position win% ≠ copyability.** A high conviction win% (a position
-snapshot) doesn't mean you profit copying the wallet: a scalper buys ~$0.50 and sells
-for ~+$1, which the snapshot scores as a "win" though he never held to resolution. So
-the feed also precomputes **Copy P&L** — the authoritative flat-$50 copy result
-(replay entries, mirror exits, settle held bets at clob resolution). It's the real
-signal: `ArbTraderRookie` shows ~100% win but **−$790** to copy; of the ~31, only a
-few are copy-positive (`Kruto2027 +$1,184`, `fortuneking +$430` — true holders). The
-live tracker follows those two. Execution lag/fees and ongoing forward validation
-still gate turning it into real money.
+**What didn't work** (see `FINDINGS.md` + `archive/`): copy-trading raw,
+win-rate ranking, LP reward farming, binary & multi-outcome arb, cross-venue
+PM↔Kalshi arb — all efficient or illusory.
 
 ---
 
 ## The honest verdict
 
-- **Detection works.** z-score + timing + funding-cluster reliably surfaces
-  statistically anomalous wallets (the 60-Minutes use case).
-- **Copying them is not proven.** In-sample a weighted, compounding copy
-  returned +545%; out-of-sample (select pre-May, copy forward) it was +168% —
-  but driven entirely by *one* longshot lottery wallet, with the strongest
-  signals contributing nothing. That's variance, not a durable, fundable edge.
-- **No turnkey public-data edge survived** — copy-trading, win-rate ranking, LP
-  reward farming, binary/multi-outcome arb, and cross-venue arb all came back
-  efficient or illusory. See [`FINDINGS.md`](FINDINGS.md).
-
-Use this to **find and watch** edge wallets and gather forward data — not as a
-green light to bet size on copying them.
+- **Detection works.** z + timing + funding clusters reliably surface anomalous
+  wallets.
+- **Copying is promising but unproven.** Selection is fee-aware and
+  execution-realistic now, but every historical return in this repo is
+  in-sample. The running July book — real lag, real fees, measured slippage,
+  missed bets counted — is the first number that deserves trust.
+- **Scale carefully.** Above ~$250/clip in thin sports books, best-ask fills
+  turn optimistic; a depth-aware fill model is the known next step before
+  sizing up.

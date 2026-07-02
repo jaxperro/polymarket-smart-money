@@ -104,18 +104,18 @@ by stake size (per-wallet p80, not a flat $200)**: the edge is wallets that win
 The per-wallet cutoff reproduces flat-$200's win-rate lift while adapting to each
 wallet's scale (a whale's $200 bet isn't conviction; a minnow's is).
 
-- `conviction_scan.py` — train pre-June / validate June on conviction bets →
-  218 matches, **62/83 profitable forward (p≈0)**. → `conviction_wallets.json`.
-- `validate_timing.py` — the **copyability selection** (rewritten 2026-06-23).
-  For every conviction wallet it runs a flat-$50 copy replay and keeps only the
-  ones genuinely profitable to copy: `copy_pnl > 0` **and** a real hold-to-
-  resolution edge (`held_pnl > 0`, held win-rate ≥55% over ≥8 resolved held bets),
-  active in 30d, median lead ≥1h (drops sub-hour snipers). It also precomputes
-  every stat the dashboard renders — including **`copy_pnl`**, the authoritative
-  flat-$50 copy P&L (replay their entries, mirror their exits, settle held bets at
-  CLOB resolution by `token_id`). → **~14 copy-positive holders** in
-  `watch_sharps.json` (read live by jaxperro.com/trading; the table defaults to
-  sorting by Copy P&L).
+- `conviction_scan.py` — train pre-June / validate June on conviction bets
+  (resolved-only) → **62/83 profitable forward (p≈0)**. → `conviction_wallets.json`.
+- `validate_timing.py` — the **copyability selection**, now **fee-aware**
+  (2026-07-02): for every conviction wallet it runs a flat-$50 copy replay that
+  pays the real taker fee on entries AND mirrored exits, and keeps only the ones
+  genuinely profitable to copy: `copy_pnl > 0` **and** a real hold-to-resolution
+  edge (`held_pnl > 0`, held win-rate ≥55% over ≥8 resolved held bets), active in
+  30d, median lead ≥1h (drops sub-hour snipers). It also precomputes every stat
+  the dashboard renders — including **`copy_pnl`**, the authoritative fee-adjusted
+  flat-$50 copy P&L (replay entries, mirror exits, settle held bets at CLOB
+  resolution by `token_id`). → **12 copy-positive holders** in `watch_sharps.json`
+  (read live by jaxperro.com/trading; the table defaults to sorting by Copy P&L).
 
 **Copy P&L is the one number that matters for picking copy targets.** It replaced
 an earlier lead-time gate. The lesson (see FINDINGS "the scalper trap"): position
@@ -128,42 +128,52 @@ small buys). Judge by Copy P&L, never win%.
 
 ## Paper portfolio (`portfolio.py` → `portfolio.json`)
 
-A $1,000 paper book that mirrors a chosen set of wallets' conviction bets at a
-flat $50/trade, **computed off the cache** (not client-side). The cache stores
-each bet's resolution time (`res_t`), so capital **recycles at the true resolution
-moment** — fixing the phantom capital-lock the old browser replay suffered (it
-missed resolution dates for high-volume wallets and skipped bets it could afford).
-Edit the `WALLETS` list at the top of `portfolio.py` to change who's followed.
-Output `portfolio.json` (equity, splits, current/resolved/missed tables, per-
-wallet) is read by the dashboard in one request. Hold-to-resolution model (the
-cache has no sell events — the right model for the holders we select); a small
-live `/positions` pull supplies the "current open bets" panel.
+A $1,000 backtest book that mirrors the followed wallets' conviction bets,
+**computed off the cache** (not client-side), backfilled from June 1. It runs the
+**same realism model as the live copybot**: dynamic stakes (4% of current equity,
+Kelly-style compounding, halved below 80% of the equity high-water mark, no
+per-trade cap), the real taker fee on every entry, a +0.5%/~90s lag-slippage
+haircut, and an optional per-event correlation cap (`EVENT_CAP`, currently off).
+The cache stores each bet's resolution time (`res_t`), so capital **recycles at
+the true resolution moment**; unresolved (early-sold) rows never score. Edit the
+`WALLETS` list at the top to change who's followed. Output `portfolio.json`
+(equity, splits, per-bet stakes, current/resolved/missed tables, fee totals,
+sizing params) is read by the dashboard in one request; a small live `/positions`
+pull supplies the "current open bets" panel.
 
-> **Caveat carried through the whole stack:** every P&L here is *idealized* — no
-> slippage, fees, or copy lag, and the wallets were selected in-sample. Treat the
-> headline % as a ceiling, not a forecast (the project's own history: an in-sample
-> copy backtest hit +168% then collapsed out-of-sample).
+> **Caveat carried through the whole stack:** fees/lag are modeled, but the
+> wallets were **selected on June data**, so the June backfill is in-sample by
+> construction (the project's own history: an in-sample copy backtest hit +168%
+> then collapsed out-of-sample). The July forward book — the Railway bot — is
+> the number that counts.
 
 ## Dashboard feeds (jaxperro.com/trading)
 
 The dashboard (in the `jaxperro` repo, `trading/index.html`) is static and reads
-two precomputed JSONs from this repo via raw.githubusercontent:
+three precomputed JSONs from this repo via raw.githubusercontent:
 
-- **`watch_sharps.json`** — the sharps table (copy-positive holders + per-wallet
-  Copy P&L, win%/record, avg bet, leads).
-- **`portfolio.json`** — the $1k paper book up top.
+- **`copybot_live.json`** — the live bot's book (open/resolved/missed bets with
+  per-fill lag, slippage, fees), committed by the bot itself on change.
+- **`watch_sharps.json`** — the sharps table (fee-adjusted Copy P&L, win%/record,
+  avg bet, leads).
+- **`portfolio.json`** — the backtest book.
 
-Both are committed + pushed by `daily.sh`, so the page is just a renderer (no
-per-wallet API calls). It keeps a client-side replay as a fallback if the feed is
-unreachable.
+The latter two are committed + pushed by `daily.sh`, so the page is just a
+renderer (no per-wallet API calls), with a client-side replay fallback.
 
-## Copy execution (separate, in progress)
+## Copy execution (`../copybot.py` — running 24/7 on Railway)
 
-Actually *placing* the copied trades lives outside this finder — `copybot.py` +
-`sync_floors.py` (a teammate's work). `sync_floors.py` recomputes each followed
-wallet's p80 conviction floor from the fresh cache into `../config.json` so the
-bot's entry gate stays in parity with the dashboard's top-20%-by-stake definition.
-This finder's job is selection + tracking; execution is downstream.
+The bot runs as a Railway worker (`../host/start.sh`: clones this repo with a
+scoped `GITHUB_TOKEN`, resumes the last committed state, polls the followed
+wallets every 60s, and commits state + feed + fills back — no volume needed).
+Paper mode is the July 2026 forward test; live mode (real money) is gated behind
+`mode:"live"` + `--live` + a typed confirmation phrase — see `../LIVE_TEST.md`
+for the supervised minimum-size runbook and `../preflight_live.py` for the
+read-only credential check. `sync_floors.py` recomputes each followed wallet's
+p80 conviction floor from the fresh cache into `../config.json` daily, so the
+bot's entry gate stays in parity with the dashboard's top-20%-by-stake
+definition (the committed `copybot.paper.json` floors are refreshed manually —
+keep them in sync when the follow set changes).
 
 ## Daily (`daily.sh`, launchd 10:00)
 
