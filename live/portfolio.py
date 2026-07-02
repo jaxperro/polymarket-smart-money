@@ -43,12 +43,12 @@ GAMMA = "https://gamma-api.polymarket.com"
 # Each new bet stakes PCT of CURRENT equity (cash + open cost basis) so the book
 # compounds in both directions; the stake is halved while equity sits below
 # DD_THRESHOLD of its high-water mark, and clamped to [STAKE_MIN, STAKE_CAP].
-# EVENT_CAP limits concurrent bets whose markets belong to the same real-world
-# event — a game's markets settle together, so N bets on one match are one
-# correlated bet, not N diversified ones.
+# EVENT_CAP >0 limits concurrent bets whose markets belong to the same real-world
+# event (a game's markets settle together — one correlated bet, not N diversified
+# ones); 0 = off, mirror every conviction trade.
 PCT = 0.04
 STAKE_MIN, STAKE_CAP = 5.0, 150.0
-EVENT_CAP = 2
+EVENT_CAP = 0
 DD_THRESHOLD, DD_FACTOR = 0.80, 0.5
 
 # ---- realism model (matches the live copybot) -------------------------------
@@ -225,10 +225,10 @@ def main():
         stake = cur_stake()
         b["stake"] = round(stake, 2)
         b["event"] = event_key(market_meta(b["cond"])["slug"])
-        # correlation cap: skip a bet when we already hold EVENT_CAP positions on
-        # the same real-world event (deliberate risk skip, tallied separately)
-        if b["event"] and sum(1 for _, _, _, r in held
-                              if r.get("event") == b["event"]) >= EVENT_CAP:
+        # correlation cap (off when EVENT_CAP=0): skip a bet when we already hold
+        # EVENT_CAP positions on the same real-world event (deliberate risk skip)
+        if EVENT_CAP and b["event"] and sum(1 for _, _, _, r in held
+                                            if r.get("event") == b["event"]) >= EVENT_CAP:
             b["capped"] = True; capped += 1
             missed.append(b)
             continue

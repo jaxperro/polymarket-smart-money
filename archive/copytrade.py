@@ -61,8 +61,9 @@ DEFAULT_CONFIG = {
         "daily_spend_cap_usd": 250.0,
         "max_total_exposure_usd": 500.0,
         "max_open_positions": 20,
-        "max_per_event": 2,          # max concurrent positions on one real-world
-                                     # event (a game's markets are one correlated bet)
+        "max_per_event": 0,          # >0 caps concurrent positions on one real-world
+                                     # event (a game's markets are one correlated bet);
+                                     # 0 = off — follow every conviction trade
         "min_price": 0.05,           # don't open longshots/near-certainties
         "max_price": 0.95,
         "min_order_usd": 5.0,        # Polymarket min order size
