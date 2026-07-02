@@ -4,6 +4,8 @@ __pycache__/
 
 # never commit live credentials or runtime state
 config.json
+config.live.json
+copybot_state.live.json
 config.json.bak
 config.example.json
 copytrade_state.json
