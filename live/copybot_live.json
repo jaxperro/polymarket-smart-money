@@ -6,6 +6,8 @@
  "deployed": 0,
  "realized": 14.94,
  "open_count": 0,
+ "fees_paid": 0.0,
+ "fee_rate": 0.03,
  "lag": {
   "n": 1,
   "avg_s": 313.5,
@@ -36,5 +38,5 @@
    "settled": 1782630754
   }
  ],
- "updated": 1782630755
+ "updated": 1782969438
 }
